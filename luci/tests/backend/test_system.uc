@@ -6,32 +6,32 @@ import * as U from 'mihomo.util';
 import { ok, eq, done } from 'lib';
 
 let leases = join('\n', [
-	'1793765867 28:6B:35:16:93:C9 192.168.77.138 W10-PC 01:28:6b:35:16:93:c9',
-	'1793764455 02:50:ca:b7:78:02 192.168.77.200 * 01:02:50:ca:b7:78:02',
+	'1793765867 AA:BB:CC:DD:EE:01 192.168.77.138 W10-PC 01:aa:bb:cc:dd:ee:01',
+	'1793764455 AA:BB:CC:DD:EE:02 192.168.77.200 * 01:AA:BB:CC:DD:EE:02',
 	''
 ]);
 let statics = [
-	{ mac: '02:50:CA:B7:78:02', name: 'usb-host', ip: '192.168.77.200' },
+	{ mac: 'AA:BB:CC:DD:EE:02', name: 'usb-host', ip: '192.168.77.200' },
 	{ mac: 'aa:aa:aa:aa:aa:aa', name: 'printer', ip: '192.168.77.50' }
 ];
 let neigh = [
-	{ dst: '192.168.77.138', dev: 'br-lan', lladdr: '28:6b:35:16:93:c9', state: ['REACHABLE'] },
-	{ dst: '2409:8d50::1', dev: 'br-lan', lladdr: '28:6b:35:16:93:c9', state: ['STALE'] },
-	{ dst: 'fe80::1', dev: 'br-lan', lladdr: '28:6b:35:16:93:c9', state: ['STALE'] },
-	{ dst: '192.168.77.190', dev: 'br-lan', lladdr: 'be:19:5b:3d:06:0b', state: ['REACHABLE'] },
+	{ dst: '192.168.77.138', dev: 'br-lan', lladdr: 'aa:bb:cc:dd:ee:01', state: ['REACHABLE'] },
+	{ dst: '2409:8d50::1', dev: 'br-lan', lladdr: 'aa:bb:cc:dd:ee:01', state: ['STALE'] },
+	{ dst: 'fe80::1', dev: 'br-lan', lladdr: 'aa:bb:cc:dd:ee:01', state: ['STALE'] },
+	{ dst: '192.168.77.190', dev: 'br-lan', lladdr: 'aa:bb:cc:dd:ee:03', state: ['REACHABLE'] },
 	{ dst: '192.168.77.99', dev: 'br-lan', state: ['FAILED'] },
 	{ dst: '192.168.77.98', dev: 'br-lan', lladdr: '11:11:11:11:11:11', state: ['INCOMPLETE'] }
 ];
 
 let list = SY.merge_devices(leases, statics, neigh);
-eq(map(list, (d) => d.mac), ['aa:aa:aa:aa:aa:aa', '02:50:ca:b7:78:02', '28:6b:35:16:93:c9', 'be:19:5b:3d:06:0b'],
+eq(map(list, (d) => d.mac), ['aa:aa:aa:aa:aa:aa', 'AA:BB:CC:DD:EE:02', 'aa:bb:cc:dd:ee:01', 'aa:bb:cc:dd:ee:03'],
 	'按名称排序，无名称的排最后；FAILED、INCOMPLETE 与无 MAC 的邻居被忽略');
-let pc = filter(list, (d) => d.mac == '28:6b:35:16:93:c9')[0];
+let pc = filter(list, (d) => d.mac == 'aa:bb:cc:dd:ee:01')[0];
 eq([pc.name, pc.ip4, pc.ip6, pc.dev, pc.online], ['W10-PC', '192.168.77.138', ['2409:8d50::1', 'fe80::1'], 'br-lan', true],
 	'租约与邻居按 MAC 合并（MAC 转小写）');
-let usb = filter(list, (d) => d.mac == '02:50:ca:b7:78:02')[0];
+let usb = filter(list, (d) => d.mac == 'AA:BB:CC:DD:EE:02')[0];
 eq([usb.name, usb.ip4, usb.online], ['usb-host', '192.168.77.200', false], '静态分配的名称优先，租约名 * 视为无名称');
-let anon = filter(list, (d) => d.mac == 'be:19:5b:3d:06:0b')[0];
+let anon = filter(list, (d) => d.mac == 'aa:bb:cc:dd:ee:03')[0];
 eq([anon.name, anon.ip4, anon.online], [null, '192.168.77.190', true], '只在邻居表中的设备');
 eq(SY.merge_devices(null, [], []), [], '没有任何来源时返回空数组');
 eq(length(SY.merge_devices('garbage line\n', [], [{ dst: 'x' }])), 0, '忽略格式不对的行');
