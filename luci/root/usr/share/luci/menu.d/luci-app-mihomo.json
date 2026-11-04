@@ -1,0 +1,68 @@
+{
+	"admin/services/mihomo": {
+		"title": "Mihomo",
+		"order": 5,
+		"action": { "type": "firstchild" },
+		"depends": { "acl": [ "luci-app-mihomo" ] }
+	},
+	"admin/services/mihomo/overview": {
+		"title": "概览",
+		"order": 10,
+		"action": { "type": "view", "path": "mihomo/overview" },
+		"depends": { "acl": [ "luci-app-mihomo" ] }
+	},
+	"admin/services/mihomo/proxies": {
+		"title": "代理",
+		"order": 20,
+		"action": { "type": "view", "path": "mihomo/proxies" },
+		"depends": { "acl": [ "luci-app-mihomo" ] }
+	},
+	"admin/services/mihomo/connections": {
+		"title": "连接",
+		"order": 30,
+		"action": { "type": "view", "path": "mihomo/connections" },
+		"depends": { "acl": [ "luci-app-mihomo" ] }
+	},
+	"admin/services/mihomo/providers": {
+		"title": "订阅",
+		"order": 40,
+		"action": { "type": "view", "path": "mihomo/providers" },
+		"depends": { "acl": [ "luci-app-mihomo" ] }
+	},
+	"admin/services/mihomo/rules": {
+		"title": "规则",
+		"order": 50,
+		"action": { "type": "view", "path": "mihomo/rules" },
+		"depends": { "acl": [ "luci-app-mihomo" ] }
+	},
+	"admin/services/mihomo/settings": {
+		"title": "设置",
+		"order": 60,
+		"action": { "type": "view", "path": "mihomo/settings" },
+		"depends": { "acl": [ "luci-app-mihomo" ] }
+	},
+	"admin/services/mihomo/core": {
+		"title": "内核",
+		"order": 65,
+		"action": { "type": "view", "path": "mihomo/core" },
+		"depends": { "acl": [ "luci-app-mihomo" ] }
+	},
+	"admin/services/mihomo/config": {
+		"title": "配置文件",
+		"order": 70,
+		"action": { "type": "view", "path": "mihomo/config" },
+		"depends": { "acl": [ "luci-app-mihomo" ] }
+	},
+	"admin/services/mihomo/logs": {
+		"title": "日志",
+		"order": 80,
+		"action": { "type": "view", "path": "mihomo/logs" },
+		"depends": { "acl": [ "luci-app-mihomo" ] }
+	},
+	"admin/services/mihomo/setup": {
+		"title": "向导",
+		"order": 90,
+		"action": { "type": "view", "path": "mihomo/setup" },
+		"depends": { "acl": [ "luci-app-mihomo" ] }
+	}
+}

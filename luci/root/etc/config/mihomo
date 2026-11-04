@@ -1,0 +1,5 @@
+
+config core 'core'
+	option repo 'liuran001/mihomo'
+	option tag 'Prerelease-Alpha'
+	option mirror 'https://ghfast.top/'

@@ -1,0 +1,7 @@
+#!/bin/sh
+# 升级后：清除 LuCI 缓存；SIGHUP 让 rpcd 保存会话后重新加载插件与 ACL，已登录的 LuCI 不受影响。
+# 不改变服务的运行状态
+rm -f /tmp/luci-indexcache*
+rm -rf /tmp/luci-modulecache
+killall -HUP rpcd 2>/dev/null
+exit 0

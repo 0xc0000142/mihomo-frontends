@@ -1,0 +1,25 @@
+# 测试用最小配置：可在路由器上与正式实例并行运行
+mixed-port: 17890
+allow-lan: false
+bind-address: 127.0.0.1
+mode: rule
+log-level: info
+ipv6: false
+external-controller: 127.0.0.1:19090
+secret: test-secret
+profile:
+  store-selected: false
+dns:
+  enable: false
+proxies:
+  - name: dummy
+    type: socks5
+    server: 127.0.0.1
+    port: 1
+proxy-groups:
+  - name: 节点选择
+    type: select
+    proxies: [dummy, DIRECT]
+rules:
+  - DOMAIN-SUFFIX,example.com,节点选择
+  - MATCH,DIRECT

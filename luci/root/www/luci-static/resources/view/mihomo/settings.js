@@ -1,0 +1,485 @@
+'use strict';
+'require view';
+'require ui';
+'require form';
+'require mihomo.api as api';
+'require mihomo.ui as mui';
+'require mihomo.header as header';
+
+/* 设置：透明代理（eBPF 入站）、基础、DNS、Tailscale。每个标签是一个 form.JSONMap；
+ * 保存时只提交与打开页面时不同的字段，所有标签的修改合成一次 patch。 */
+
+// [数据键（点号表示嵌套）, 类型]；表单选项名把点号换成 __（LuCI 用点号拼接元素 id）
+const SPECS = {
+	ebpf: [
+		[ 'local_enable', 'bool' ], [ 'shared_enable', 'bool' ], [ 'network', 'list' ], [ 'udp-timeout', 'int' ],
+		[ 'bypass-rule-set', 'list' ], [ 'fakeip-icmp', 'str' ], [ 'tc-priority', 'int' ], [ 'bypass-tun-direct', 'bool' ],
+		[ 'local.data-plane', 'str' ], [ 'local.dns-mode', 'str' ], [ 'local.ipv6', 'bool' ], [ 'local.bypass-private-address', 'bool' ],
+		[ 'local.bypass-exclude', 'list' ], [ 'local.bypass-port', 'list' ],
+		[ 'shared.interface', 'list' ], [ 'shared.data-plane', 'str' ], [ 'shared.dns-mode', 'str' ], [ 'shared.ipv6', 'bool' ],
+		[ 'shared.bypass-private-address', 'bool' ], [ 'shared.allow-default-upstream', 'bool' ], [ 'shared.bypass-exclude', 'list' ],
+		[ 'shared.bypass-port', 'list' ], [ 'shared.include-mac-address', 'list' ], [ 'shared.exclude-mac-address', 'list' ],
+		[ 'shared.include-source-cidr', 'list' ], [ 'shared.exclude-source-cidr', 'list' ]
+	],
+	basic: [
+		[ 'mixed-port', 'int' ], [ 'allow-lan', 'bool' ], [ 'bind-address', 'str' ], [ 'ipv6', 'bool' ], [ 'log-level', 'str' ],
+		[ 'find-process-mode', 'str' ], [ 'tcp-concurrent', 'bool' ], [ 'unified-delay', 'bool' ], [ 'sniffer.enable', 'bool' ],
+		[ 'external-controller', 'str' ], [ 'secret', 'str' ], [ 'external-ui', 'str' ], [ 'external-ui-url', 'str' ],
+		[ 'geox-url.geoip', 'str' ], [ 'geox-url.geosite', 'str' ], [ 'geox-url.mmdb', 'str' ], [ 'profile.store-selected', 'bool' ]
+	],
+	dns: [
+		[ 'enable', 'bool' ], [ 'listen', 'str' ], [ 'enhanced-mode', 'str' ], [ 'ipv6', 'bool' ], [ 'fake-ip-range', 'str' ],
+		[ 'fake-ip-range6', 'str' ], [ 'default-nameserver', 'list' ], [ 'nameserver', 'list' ], [ 'proxy-server-nameserver', 'list' ],
+		[ 'direct-nameserver', 'list' ], [ 'fake-ip-filter', 'list' ]
+	],
+	tailscale: [
+		[ 'hostname', 'str' ], [ 'auth-key', 'str' ], [ 'udp', 'bool' ], [ 'accept-routes', 'bool' ], [ 'advertise-exit-node', 'bool' ],
+		[ 'advertise-routes', 'list' ], [ 'listen-port', 'int' ]
+	]
+};
+
+function optName(key) {
+	return key.replace(/\./g, '__');
+}
+
+function getPath(obj, key) {
+	return key.split('.').reduce((o, k) => (o != null && typeof o === 'object') ? o[k] : null, obj);
+}
+
+function setPath(obj, key, v) {
+	const ks = key.split('.');
+	let o = obj;
+	for (let i = 0; i < ks.length - 1; i++) o = (o[ks[i]] = o[ks[i]] || {});
+	o[ks[ks.length - 1]] = v;
+}
+
+// 区段数据 → JSONMap 的值：布尔为 '1'/'0'，数字为字符串，列表原样；没有值为 null（表单显示默认值）
+function toForm(kind, data) {
+	const out = {};
+	SPECS[kind].forEach(([ key, t ]) => {
+		const v = data ? getPath(data, key) : null;
+		let f = null;
+		if (v != null) {
+			if (t === 'bool') f = v ? '1' : '0';
+			else if (t === 'list') f = Array.isArray(v) ? v.map(String) : [ String(v) ];
+			else f = String(v);
+		}
+		out[optName(key)] = f;
+	});
+	return out;
+}
+
+// 表单值 → patch 的 data（嵌套）；空字符串、空列表表示删除（使用默认值），由后端处理
+function fromForm(kind, form, only) {
+	const out = {};
+	SPECS[kind].forEach(([ key, t ]) => {
+		const name = optName(key);
+		if (only && only.indexOf(name) < 0) return;
+		let v = form[name];
+		if (t === 'bool') v = (v == null || v === '') ? null : (v === '1' || v === true);
+		else if (t === 'int') v = (v == null || String(v).trim() === '') ? '' : Number(String(v).trim());
+		else if (t === 'list') v = Array.isArray(v) ? v.map(s => String(s).trim()).filter(s => s !== '') : ((v == null || v === '') ? [] : [ String(v).trim() ]);
+		else v = (v == null) ? '' : String(v).trim();
+		setPath(out, key, v);
+	});
+	return out;
+}
+
+function canon(v) {
+	if (Array.isArray(v)) return v.map(canon);
+	if (v && typeof v === 'object') {
+		const o = {};
+		Object.keys(v).sort().forEach(k => { o[k] = canon(v[k]); });
+		return o;
+	}
+	return v;
+}
+
+// 两份数据是否不同（忽略键顺序；null 与 '' 视为相同）
+function changed(a, b) {
+	const norm = v => (v === '' || v === undefined) ? null : v;
+	return JSON.stringify(canon(norm(a))) !== JSON.stringify(canon(norm(b)));
+}
+
+// 打开页面时与现在的表单值比较，返回有变化的选项名
+function changedFields(before, now) {
+	return Object.keys(now).filter(k => changed(before[k], now[k]));
+}
+
+// DNS 策略表：服务器用空格或逗号分隔
+function policyRows(list) {
+	return (list || []).map(p => ({ key: p.key, servers: (p.servers || []).join(' ') }));
+}
+
+function policyData(rows) {
+	return rows.map(r => ({ key: String(r.key || '').trim(), servers: String(r.servers || '').split(/[\s,]+/).filter(Boolean) }))
+		.filter(r => r.key !== '' || r.servers.length);
+}
+
+const TABS = [ [ 'ebpf', '透明代理' ], [ 'basic', '基础' ], [ 'dns', 'DNS' ], [ 'tailscale', 'Tailscale' ] ];
+const DNS_MODES = [ [ 'hijack', 'hijack：接管 DNS 查询' ], [ 'respect_policy', 'respect_policy：按规则决定是否接管' ], [ 'off', 'off：不处理 DNS' ] ];
+
+return view.extend({
+	SPECS, toForm, fromForm, changed, changedFields, policyRows, policyData,
+
+	handleSave: null,
+	handleSaveApply: null,
+	handleReset: null,
+
+	load() {
+		return Promise.resolve();
+	},
+
+	render() {
+		mui.loadCss();
+		this.tab = this.tab || 'ebpf';
+		this.tabBtns = TABS.map(([ id, title ]) => E('button', { 'class': 'mh-seg-btn', 'data-tab': id, 'click': () => this.showTab(id) }, title));
+		this.panels = {};
+		TABS.forEach(([ id ]) => { this.panels[id] = E('div', { 'class': 'mh-set-panel' }); });
+		this.saveBtn = mui.btn('保存并应用', () => this.save(), 'cbi-button-apply');
+		this.resetBtn = mui.btn('放弃修改', () => this.reload(), '');
+		this.body = E('div', {}, mui.card('', mui.empty('读取中…')));
+		const root = E('div', { 'class': 'mh mh-settings' }, [
+			header.render(),
+			E('div', { 'class': 'mh-card mh-px-toolbar mh-toolbar' }, [ E('div', { 'class': 'mh-seg' }, this.tabBtns), E('span', { 'class': 'mh-grow' }) ]),
+			this.body,
+			E('div', { 'class': 'mh-set-foot' }, [ this.resetBtn, this.saveBtn ])
+		]);
+		this.reload();
+		return root;
+	},
+
+	showTab(id) {
+		this.tab = id;
+		this.tabBtns.forEach(b => b.classList.toggle('active', b.getAttribute('data-tab') === id));
+		Object.keys(this.panels).forEach(k => { this.panels[k].hidden = k !== id; });
+	},
+
+	reload() {
+		this.saveBtn.disabled = true;
+		return Promise.all([
+			api.rpc.sections([ 'ebpf', 'basic', 'dns', 'tailscale' ]),
+			api.rpc.interfaces().catch(() => null),
+			api.rpc.devices().catch(() => null),
+			api.rpc.tailscale().catch(() => null)
+		]).then(([ s, ifs, devs, ts ]) => {
+			if (!s || !s.ok) throw new Error((s && s.error) || '读取失败');
+			if (s.parse_error) {
+				this.body.replaceChildren(mui.card('', mui.empty(s.parse_error, E('a', { href: L.url('admin/services/mihomo/config') }, '打开配置文件页'))));
+				return;
+			}
+			this.rev = s.rev;
+			this.sec = s;
+			this.ifs = (ifs && ifs.ok && ifs.list) || [];
+			this.devs = (devs && devs.ok && devs.list) || [];
+			this.tsStatus = (ts && ts.ok && ts.list) || [];
+			this.forms = {};
+			return Promise.all([ this.buildEbpf(), this.buildBasic(), this.buildDns(), this.buildTailscale() ]).then(() => {
+				this.body.replaceChildren(...TABS.map(([ id ]) => this.panels[id]));
+				this.showTab(this.tab);
+				this.saveBtn.disabled = false;
+			});
+		}).catch(e => {
+			this.body.replaceChildren(mui.card('', mui.empty('无法读取设置：' + e.message)));
+		});
+	},
+
+	// 渲染一个 JSONMap，记录打开时的表单值。sid 为区段名，kind 为 SPECS 的键
+	mount(panel, key, kind, sid, data, build, extra) {
+		const values = {};
+		values[sid] = toForm(kind, data);
+		const m = new form.JSONMap(values, null, null);
+		const s = m.section(form.NamedSection, sid, sid);
+		s.anonymous = true;
+		build(s, data);
+		return m.render().then(node => {
+			const entry = { m: m, s: s, sid: sid, kind: kind, before: s.formvalue(sid), extra: extra || null };
+			this.forms[key] = entry;
+			panel.appendChild(node);
+			return entry;
+		});
+	},
+
+	unsupported(panel, reason) {
+		panel.replaceChildren(mui.card('', mui.empty(reason, E('a', { href: L.url('admin/services/mihomo/config') }, '在配置文件页编辑'))));
+	},
+
+	/* ---------- 透明代理 ---------- */
+
+	buildEbpf() {
+		const sec = this.sec.ebpf, panel = this.panels.ebpf;
+		panel.replaceChildren();
+		if (sec.unsupported) return this.unsupported(panel, sec.reason);
+		if (sec.missing) {
+			panel.appendChild(mui.card('eBPF 透明入站', mui.empty('配置中没有 eBPF 入站。创建后默认同时代理本机与 br-lan 下联设备（hybrid），国内 IP 段在内核直连（需要有 CN-IP 规则集）。',
+				mui.btn('创建 eBPF 入站', () => mui.runJob(api.rpc.patch([ { op: 'ebpf.create' } ], this.rev)).then(() => this.reload()), 'cbi-button-add'))));
+			return;
+		}
+		const d = sec.data;
+		const note = [];
+		if (sec.legacy && sec.legacy.length)
+			note.push(E('div', { 'class': 'mh-banner warn' }, '配置中有旧写法（' + sec.legacy.join('、') + '），这里已按 mihomo 的规则展开到各角色。保存本页时会改成新写法。'));
+		note.push(E('p', { 'class': 'mh-note' }, '入站「' + (sec.name || 'ebpf') + '」，角色开关写作 ' + (sec.style === 'enable' ? 'local.enable / shared.enable' : 'mode') +
+			'。关闭某个角色时它的其余设置保留，mihomo 会忽略。'));
+		panel.appendChild(E('div', {}, note));
+		const ifs = this.ifs, devs = this.devs, cur = getPath(d, 'shared.interface') || [];
+		const sets = sec.ipcidr_sets || [];
+		const curSets = d['bypass-rule-set'] || [];
+		return this.mount(panel, 'ebpf', 'ebpf', 'ebpf', d, s => {
+			s.tab('general', '通用');
+			s.tab('local', '本机流量（local）');
+			s.tab('shared', '下联设备（shared）');
+			let o;
+			o = s.taboption('general', form.Flag, 'local_enable', '本机流量', '代理路由器自身发出的连接');
+			o = s.taboption('general', form.Flag, 'shared_enable', '下联设备', '代理局域网设备经本机转发的连接');
+			o = s.taboption('general', form.MultiValue, 'network', '协议');
+			o.value('tcp', 'TCP');
+			o.value('udp', 'UDP');
+			o.default = [ 'tcp', 'udp' ];
+			o = s.taboption('general', form.Value, 'udp-timeout', 'UDP 会话超时（秒）');
+			o.datatype = 'range(5,86400)';
+			o.placeholder = '300';
+			o = s.taboption('general', form.MultiValue, 'bypass-rule-set', '内核直连的规则集', '只能选 behavior 为 ipcidr 的规则集，命中的目标地址不进入 mihomo');
+			sets.concat(curSets.filter(n => sets.indexOf(n) < 0)).forEach(n => o.value(n, n));
+			o = s.taboption('general', form.ListValue, 'fakeip-icmp', 'FakeIP 的 ICMP');
+			o.value('off', 'off：不处理（默认）');
+			o.value('reply', 'reply：代答 ping');
+			o.default = 'off';
+			o = s.taboption('general', form.Flag, 'bypass-tun-direct', 'TUN 共存直连', '同时开启 TUN 时，被 eBPF 放行的目标直接连接，不再进 TUN（默认开启）');
+			o.default = '1';
+			o = s.taboption('general', form.Value, 'tc-priority', 'TC 优先级', '数字越小越先执行，留空使用默认值');
+			o.datatype = 'range(0,65535)';
+
+			const role = (tab, r, planes) => {
+				o = s.taboption(tab, form.ListValue, r + '__data-plane', '数据面');
+				planes.forEach(p => o.value(p[0], p[1]));
+				o.default = planes[0][0];
+				o = s.taboption(tab, form.ListValue, r + '__dns-mode', 'DNS');
+				DNS_MODES.forEach(p => o.value(p[0], p[1]));
+				o.default = 'hijack';
+				o = s.taboption(tab, form.Flag, r + '__ipv6', '处理 IPv6');
+				o.default = '1';
+				o = s.taboption(tab, form.Flag, r + '__bypass-private-address', '私网地址直连', '目标为私网、链路本地等地址时不进入 mihomo（默认开启）');
+				o.default = '1';
+				o = s.taboption(tab, form.DynamicList, r + '__bypass-exclude', '强制进入 mihomo 的地址段', '即使属于私网也拦截，例如 Tailscale 的 100.64.0.0/10、fd7a:115c:a1e0::/48');
+				o.datatype = 'ipaddr';
+				o = s.taboption(tab, form.DynamicList, r + '__bypass-port', '直连的目标端口');
+				o.datatype = 'port';
+			};
+			role('local', 'local', [ [ 'cgroup', 'cgroup（默认）' ], [ 'tc', 'tc' ] ]);
+
+			o = s.taboption('shared', form.MultiValue, 'shared__interface', '下联网卡', '局域网设备所在的网卡；默认出口网卡会被自动跳过');
+			o.create = true;
+			ifs.filter(i => i.up || cur.indexOf(i.name) >= 0).forEach(i => o.value(i.name, mui.ifLabel(i)));
+			cur.filter(n => !ifs.some(i => i.name === n)).forEach(n => o.value(n, n + '（不存在）'));
+			role('shared', 'shared', [ [ 'packet_rewrite', 'packet_rewrite（默认）' ], [ 'socket_assign', 'socket_assign' ] ]);
+			o = s.taboption('shared', form.Flag, 'shared__allow-default-upstream', '默认出口也作为下联', '单臂旁路由：唯一的网卡既是出口又是下联时开启');
+			const macs = (tab, name, title) => {
+				o = s.taboption(tab, form.DynamicList, name, title);
+				o.datatype = 'macaddr';
+				devs.forEach(dv => o.value(dv.mac, (dv.name || dv.ip4 || dv.mac) + '（' + dv.mac + (dv.ip4 ? '，' + dv.ip4 : '') + '）'));
+			};
+			macs('shared', 'shared__include-mac-address', '只代理这些设备（MAC）');
+			macs('shared', 'shared__exclude-mac-address', '不代理这些设备（MAC）');
+			o = s.taboption('shared', form.DynamicList, 'shared__include-source-cidr', '只代理这些来源地址');
+			o.datatype = 'ipaddr';
+			o = s.taboption('shared', form.DynamicList, 'shared__exclude-source-cidr', '不代理这些来源地址');
+			o.datatype = 'ipaddr';
+		});
+	},
+
+	/* ---------- 基础 ---------- */
+
+	buildBasic() {
+		const panel = this.panels.basic;
+		panel.replaceChildren();
+		return this.mount(panel, 'basic', 'basic', 'basic', this.sec.basic, s => {
+			s.tab('net', '网络');
+			s.tab('ctl', '控制器与面板');
+			s.tab('geo', 'GEO 数据');
+			let o;
+			o = s.taboption('net', form.Value, 'mixed-port', '混合端口', 'HTTP 与 SOCKS5 代理端口，0 表示关闭');
+			o.datatype = 'range(0,65535)';
+			o = s.taboption('net', form.Flag, 'allow-lan', '允许局域网连接', '允许其他设备使用混合端口');
+			o = s.taboption('net', form.Value, 'bind-address', '监听地址', '* 表示所有地址');
+			o.placeholder = '*';
+			o.validate = (sid, v) => (!v || v === '*' || /^[0-9a-fA-F:.]+$/.test(v)) ? true : '填写 * 或 IP 地址';
+			o = s.taboption('net', form.Flag, 'ipv6', 'IPv6', '关闭后不使用 IPv6 连接');
+			o.default = '1';
+			o = s.taboption('net', form.Flag, 'tcp-concurrent', 'TCP 并发', '域名解析出多个地址时同时连接，使用最先连上的');
+			o = s.taboption('net', form.Flag, 'unified-delay', '统一延迟', '测速时去掉握手等额外耗时');
+			o = s.taboption('net', form.ListValue, 'find-process-mode', '查找进程');
+			o.value('off', 'off：关闭（路由器推荐）');
+			o.value('strict', 'strict：由 mihomo 判断');
+			o.value('always', 'always：总是查找');
+			o.default = 'strict';
+			o = s.taboption('net', form.Flag, 'sniffer__enable', '域名嗅探', '从 TLS、HTTP 等流量中识别域名');
+			o = s.taboption('net', form.ListValue, 'log-level', '日志级别');
+			[ 'silent', 'error', 'warning', 'info', 'debug' ].forEach(l => o.value(l, l));
+			o.default = 'info';
+			o = s.taboption('net', form.Flag, 'profile__store-selected', '记住手动选择的节点');
+
+			o = s.taboption('ctl', form.Value, 'external-controller', '控制器地址', '本插件的实时页面与 zashboard 都通过它访问 mihomo；改动后页面会重新连接');
+			o.rmempty = false;
+			o.validate = (sid, v) => /^(\[[0-9a-fA-F:.]+\]|[^\s:\[\]]*):[0-9]{1,5}$/.test(v || '') ? true : '格式为 地址:端口，例如 0.0.0.0:9090';
+			o = s.taboption('ctl', form.Value, 'secret', '控制器密钥', '留空表示不需要密钥');
+			o.password = true;
+			o = s.taboption('ctl', form.Value, 'external-ui', '面板目录', '相对配置目录，例如 ./dashboard');
+			o = s.taboption('ctl', form.Value, 'external-ui-url', '面板下载地址');
+			o.datatype = 'string';
+
+			o = s.taboption('geo', form.Value, 'geox-url__geoip', 'GeoIP');
+			o = s.taboption('geo', form.Value, 'geox-url__geosite', 'GeoSite');
+			o = s.taboption('geo', form.Value, 'geox-url__mmdb', 'MMDB');
+		});
+	},
+
+	/* ---------- DNS ---------- */
+
+	buildDns() {
+		const sec = this.sec.dns, panel = this.panels.dns;
+		panel.replaceChildren();
+		if (sec.unsupported) return this.unsupported(panel, sec.reason);
+		const rows = policyRows(sec['nameserver-policy']);
+		const table = this.policyTable(rows);
+		return this.mount(panel, 'dns', 'dns', 'dns', sec, s => {
+			let o;
+			o = s.option(form.Flag, 'enable', '启用 DNS');
+			o = s.option(form.Value, 'listen', '监听地址', '例如 0.0.0.0:1053；留空不对外提供 DNS');
+			o = s.option(form.ListValue, 'enhanced-mode', '模式');
+			o.value('redir-host', 'redir-host');
+			o.value('fake-ip', 'fake-ip');
+			o.value('normal', 'normal');
+			o.default = 'redir-host';
+			o = s.option(form.Flag, 'ipv6', '返回 IPv6 地址（AAAA）');
+			o = s.option(form.Value, 'fake-ip-range', 'FakeIP 地址段（IPv4）');
+			o.datatype = 'cidr4';
+			o.placeholder = '198.18.0.1/16';
+			o = s.option(form.Value, 'fake-ip-range6', 'FakeIP 地址段（IPv6）');
+			o.datatype = 'cidr6';
+			o = s.option(form.DynamicList, 'default-nameserver', '引导服务器', '用于解析其他 DNS 服务器的域名，只能填 IP');
+			o = s.option(form.DynamicList, 'nameserver', '默认服务器');
+			o = s.option(form.DynamicList, 'proxy-server-nameserver', '代理节点域名的服务器');
+			o = s.option(form.DynamicList, 'direct-nameserver', '直连域名的服务器');
+			o = s.option(form.DynamicList, 'fake-ip-filter', '不使用 FakeIP 的域名', '例如 rule-set:Fake-IP-Filter、+.lan');
+		}, { policy: rows.map(r => Object.assign({}, r)), table: table }).then(() => {
+			panel.appendChild(mui.card('按域名指定服务器（nameserver-policy）', [
+				table.root,
+				E('p', { 'class': 'mh-note' }, '匹配条件如 +.example.com、geosite:cn、rule-set:名称；多个服务器用空格分隔。按顺序匹配。')
+			]));
+		});
+	},
+
+	policyTable(rows) {
+		const tbody = E('tbody', {});
+		const draw = () => {
+			tbody.replaceChildren(...rows.map((r, i) => {
+				const k = E('input', { type: 'text', 'class': 'cbi-input-text', value: r.key, placeholder: '+.example.com' });
+				const v = E('input', { type: 'text', 'class': 'cbi-input-text', value: r.servers, placeholder: '223.5.5.5 https://dns.alidns.com/dns-query' });
+				k.addEventListener('input', () => { r.key = k.value; });
+				v.addEventListener('input', () => { r.servers = v.value; });
+				const b = (label, title, fn, disabled) => E('button', { 'class': 'mh-x', title: title, disabled: disabled ? '' : null, 'click': fn }, label);
+				return E('tr', {}, [
+					E('td', { 'class': 'mh-pol-key' }, k), E('td', {}, v),
+					E('td', { 'class': 'mh-actions' }, [
+						b('↑', '上移', () => { rows.splice(i - 1, 0, rows.splice(i, 1)[0]); draw(); }, i === 0),
+						b('↓', '下移', () => { rows.splice(i + 1, 0, rows.splice(i, 1)[0]); draw(); }, i === rows.length - 1),
+						b('✕', '删除', () => { rows.splice(i, 1); draw(); })
+					])
+				]);
+			}));
+			if (!rows.length) tbody.appendChild(E('tr', {}, E('td', { colspan: 3 }, mui.empty('没有按域名指定的服务器'))));
+		};
+		draw();
+		return {
+			rows: rows,
+			root: E('div', {}, [
+				E('div', { 'class': 'mh-scroll-x' }, E('table', { 'class': 'mh-table mh-pol-table' }, [
+					E('thead', {}, E('tr', {}, [ E('th', {}, '匹配条件'), E('th', {}, '服务器'), E('th', {}, '') ])), tbody
+				])),
+				E('div', { 'class': 'mh-toolbar', style: 'margin-top:8px' }, mui.btn('添加', () => { rows.push({ key: '', servers: '' }); draw(); }, 'mh-btn-sm cbi-button-add'))
+			])
+		};
+	},
+
+	/* ---------- Tailscale ---------- */
+
+	buildTailscale() {
+		const list = this.sec.tailscale, panel = this.panels.tailscale;
+		panel.replaceChildren();
+		if (!Array.isArray(list)) return this.unsupported(panel, (list && list.reason) || '无法读取');
+		if (!list.length) {
+			panel.appendChild(mui.card('', mui.empty('配置中没有 type: tailscale 的代理。')));
+			return;
+		}
+		return Promise.all(list.map((t, i) => {
+			const st = this.tsStatus.find(x => x.name === t.name) || {};
+			const box = E('div', {});
+			panel.appendChild(mui.card('Tailscale：' + t.name, [
+				E('div', { 'class': 'mh-ts-status' }, [
+					mui.row('登录状态', st.logged_in ? E('span', { 'class': 'mh-ok' }, '已登录') : E('span', { 'class': 'mh-warn' }, '未登录（填写 auth-key 后保存，或查看日志中的登录链接）')),
+					st.login ? mui.row('账号', st.login) : '',
+					st.tailnet ? mui.row('Tailnet', st.tailnet) : '',
+					st.magic_dns ? mui.row('MagicDNS', st.magic_dns) : '',
+					mui.row('状态目录', st.state_dir || '-')
+				]),
+				box,
+				E('p', { 'class': 'mh-note' }, '名称不能在这里修改：规则、策略组与 ts://' + t.name + ' 都按名称引用它。已登录时修改 auth-key 不会切换账号。')
+			]));
+			return this.mount(box, 'ts' + i, 'tailscale', 'ts' + i, t, s => {
+				let o;
+				o = s.option(form.Value, 'hostname', '主机名', '在 Tailnet 中显示的名称');
+				o.validate = (sid, v) => (!v || /^[A-Za-z0-9-]{1,63}$/.test(v)) ? true : '只能包含字母、数字与 -';
+				o = s.option(form.Value, 'auth-key', 'Auth key');
+				o.password = true;
+				o = s.option(form.Flag, 'udp', '转发 UDP');
+				o = s.option(form.Flag, 'accept-routes', '接受子网路由');
+				o = s.option(form.Flag, 'advertise-exit-node', '作为出口节点');
+				o = s.option(form.DynamicList, 'advertise-routes', '通告子网路由', '例如 192.168.77.0/24；需要在 Tailscale 管理后台批准');
+				o.datatype = 'ipaddr';
+				o = s.option(form.Value, 'listen-port', 'UDP 监听端口', '留空或 0 表示随机端口');
+				o.datatype = 'range(0,65535)';
+			}, { name: t.name });
+		}));
+	},
+
+	/* ---------- 保存 ---------- */
+
+	collect() {
+		const ops = [];
+		let ctlChanged = false;
+		Object.keys(this.forms).forEach(key => {
+			const f = this.forms[key];
+			const now = f.s.formvalue(f.sid);
+			const names = changedFields(f.before, now);
+			let data = names.length ? fromForm(f.kind, now, names) : null;
+			if (key === 'dns') {
+				const before = policyData(f.extra.policy), after = policyData(f.extra.table.rows);
+				if (changed(before, after)) {
+					data = data || {};
+					data['nameserver-policy'] = after;
+				}
+			}
+			if (!data) return;
+			if (key === 'ebpf') ops.push({ op: 'ebpf.set', data: data });
+			else if (key === 'basic') {
+				ops.push({ op: 'basic.set', data: data });
+				ctlChanged = 'external-controller' in data || 'secret' in data;
+			} else if (key === 'dns') ops.push({ op: 'dns.set', data: data });
+			else ops.push({ op: 'tailscale.set', name: f.extra.name, data: data });
+		});
+		return { ops: ops, ctlChanged: ctlChanged };
+	},
+
+	save() {
+		const maps = Object.keys(this.forms).map(k => this.forms[k].m);
+		Promise.all(maps.map(m => m.parse())).then(() => {
+			const c = this.collect();
+			if (!c.ops.length) return mui.notify('没有修改');
+			return mui.runJob(api.rpc.patch(c.ops, this.rev)).then(s => {
+				if (s.state === 'done' && c.ctlChanged) api.controller(true);
+				if (s.state === 'done' || s.state === 'rolled_back') return this.reload();
+			});
+		}, e => mui.notify('表单有错误：' + e.message, 'error'));
+	}
+});

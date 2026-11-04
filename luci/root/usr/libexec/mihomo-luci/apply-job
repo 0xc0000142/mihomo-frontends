@@ -1,0 +1,7 @@
+#!/usr/bin/ucode
+'use strict';
+
+// 由 luci.mihomo 的保存操作拉起：apply-job <任务编号>
+import { run_job } from 'mihomo.apply';
+
+run_job(ARGV[0]);

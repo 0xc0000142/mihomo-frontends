@@ -1,0 +1,182 @@
+# 仿照线上配置结构的脱敏样例：锚点、合并键、各表单区段。只用于 patch 测试（-t 校验），不启动实例。
+# 锚点定义 - 订阅提供者基础配置
+p: &p
+  type: http
+  interval: 3600 # 订阅更新间隔（秒）
+  health-check:
+    enable: true
+    url: https://cp.cloudflare.com
+    interval: 300 # 健康检查间隔（秒）
+    timeout: 1000
+# 锚点定义 - select 策略组公共出站列表
+pr: &pr
+  type: select
+  proxies: [节点选择, 香港, 全部节点, 自动选择, DIRECT]
+# 锚点定义 - Smart 组共用的订阅
+use: &use
+  type: smart
+  use:
+    - 甲
+    #- 停用的
+    - 乙
+    - Kitty
+  url: https://cp.cloudflare.com
+  interval: 300
+  lazy: true
+proxy-providers:
+  甲:
+    <<: *p
+    path: ./proxy_provider/甲.yaml
+    url: "http://127.0.0.1:1/a?token=x&flag=1"
+    override:
+      additional-prefix: "[甲]"
+  #停用的:
+  #  <<: *p
+  乙:
+    <<: *p
+    path: ./proxy_provider/乙.yaml
+    url: "http://127.0.0.1:1/b"
+    override:
+      additional-prefix: "[乙]"
+    header:
+      User-Agent:
+        - "clash-verge/v2.5.2"
+  Kitty:
+    type: http
+    path: ./proxy_provider/Kitty.yaml
+    url: http://127.0.0.1:1/k
+    interval: 7200
+mixed-port: 17891
+mode: rule
+ipv6: true
+allow-lan: true
+bind-address: '*'
+unified-delay: false
+tcp-concurrent: true
+log-level: warning
+find-process-mode: off
+external-controller: 127.0.0.1:19091
+external-ui: ./dashboard
+profile:
+  store-selected: true
+  store-fake-ip: true
+geox-url:
+  geoip: "https://example.com/geoip.dat"
+  geosite: "https://example.com/geosite.dat"
+  mmdb: "https://example.com/country.mmdb"
+sniffer:
+  enable: true
+  sniff:
+    TLS:
+      ports: [443, 8443]
+dns:
+  enable: true
+  ipv6: false
+  listen: 127.0.0.1:11053
+  enhanced-mode: redir-host
+  fake-ip-range: 198.18.0.1/16
+  fake-ip-filter:
+    - "rule-set:Fake-IP-Filter"
+  proxy-server-nameserver:
+    - 223.5.5.5
+  nameserver-policy:
+    rule-set:AWAvenue-Ads: rcode://success
+    +.tail.ts.net:
+      - ts://TS-Server
+    "+.lan.example":
+      - 223.5.5.5
+      - 119.29.29.29
+  nameserver:
+    - https://1.1.1.1/dns-query#节点选择
+proxies:
+  - {name: DNS_Hijack, type: dns}
+  - name: TS-Server
+    type: tailscale
+    hostname: test-node
+    auth-key: tskey-test-123
+    state-dir: ts-test
+    control-url: http://127.0.0.1:1
+    udp: true
+    # 不要填写 dialer-proxy
+    listen-port: 41642
+    advertise-exit-node: true
+proxy-groups:
+  - name: 节点选择
+    type: select
+    proxies: [全部节点, 自动选择, 香港, TS-Server, DIRECT]
+  - {name: dns, <<: *pr}
+  - {name: 香港, <<: *use, filter: "(?i)港|HK"}
+  - {name: 全部节点, <<: *use}
+  - {name: 自动选择, <<: *use, tolerance: 2, type: url-test}
+  - name: 单独
+    type: select
+    use: [甲, 乙, Kitty]
+rule-providers:
+  Fake-IP-Filter:
+    type: http
+    behavior: domain
+    format: mrs
+    interval: 86400
+    path: ./rule_provider/Fake-IP-Filter.mrs
+    url: "https://example.com/fake-ip-filter.mrs"
+    proxy: DIRECT
+  AWAvenue-Ads:
+    type: http
+    behavior: domain
+    format: mrs
+    interval: 86400 # 每天更新
+    path: ./rule_provider/AWAvenue-Ads.mrs
+    url: "https://example.com/ads.mrs"
+    proxy: 节点选择
+  CN-IP:
+    type: http
+    behavior: ipcidr
+    format: mrs
+    interval: 86400
+    url: https://example.com/cn-ip.mrs
+    path: ./rule_provider/cn-ip.mrs
+    proxy: 节点选择
+  Unused:
+    type: http
+    behavior: classical
+    format: yaml
+    url: https://example.com/unused.yaml
+    path: ./rule_provider/unused.yaml
+  Private-IP:
+    type: inline
+    behavior: ipcidr
+    payload:
+      - 10.0.0.0/8
+      - 192.168.0.0/16
+rules:
+  # Tailscale 在最前
+  - IP-CIDR,100.64.0.0/10,TS-Server,no-resolve
+  # DNS 劫持
+  - DST-PORT,53,DNS_Hijack
+  - DOMAIN-SUFFIX, example.org, 香港
+  - RULE-SET,AWAvenue-Ads,REJECT
+  - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT
+  - OR,((RULE-SET,Private-IP),(DOMAIN,lan.example)),DIRECT # 局域网
+  - RULE-SET,CN-IP,DIRECT
+  - MATCH,节点选择
+# eBPF 透明入站
+listeners:
+  - name: ebpf-in
+    type: ebpf
+    mode: hybrid
+    network: [tcp, udp]
+    udp-timeout: 300
+    bypass-rule-set: [CN-IP] # 国内 IP 在内核直连
+    dns-mode: hijack
+    local:
+      data-plane: cgroup
+      ipv6: true
+      bypass-private-address: true
+      # 私网放行列表包含 100.64.0.0/10，Tailnet 需要强制进核心
+      bypass-exclude: [100.64.0.0/10, fd7a:115c:a1e0::/48]
+    shared:
+      interface: [br-lan]
+      data-plane: packet_rewrite
+      ipv6-mode: always
+      bypass-private-address: true
+      bypass-exclude: [100.64.0.0/10, fd7a:115c:a1e0::/48]

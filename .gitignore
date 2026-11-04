@@ -2,3 +2,7 @@ dist/
 *.zip
 .DS_Store
 Thumbs.db
+
+# 模板由 scripts/sync-template.sh 从 shared/ 生成
+luci/root/usr/share/mihomo-luci/template.yaml
+magisk/webroot/template.yaml

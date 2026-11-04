@@ -1,0 +1,66 @@
+name: build
+
+on:
+  push:
+    tags: ['v*']
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  magisk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 打包 Magisk/KernelSU 模块
+        run: |
+          sh magisk/build.sh
+          ls -l dist/
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: magisk-module
+          path: dist/*-magisk-*.zip
+
+  luci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装构建依赖
+        run: sudo apt-get update && sudo apt-get install -y gcc ninja-build python3-venv libssl-dev zlib1g-dev libzstd-dev
+      - name: 缓存 apk-tools
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/mh-tools
+          key: mh-tools-${{ runner.os }}-v3.0.5
+      - name: 安装 apk-tools
+        run: sh luci/scripts/setup-apk-tools.sh
+      - name: 打包 LuCI 应用
+        run: |
+          cd luci
+          sh scripts/build-apk.sh
+          ls -l dist/
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: luci-apk
+          path: luci/dist/*.apk
+
+  release:
+    needs: [magisk, luci]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/magisk-module/*.zip
+            artifacts/luci-apk/*.apk
+          generate_release_notes: true

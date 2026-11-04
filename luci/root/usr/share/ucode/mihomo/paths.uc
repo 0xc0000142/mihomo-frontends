@@ -1,0 +1,37 @@
+'use strict';
+
+// 所有路径集中在这里。MIHOMO_LUCI_* 环境变量只给测试用，正式运行时都未设置。
+function env(name, dflt) {
+	let v = getenv(name);
+	return (v != null && v != '') ? v : dflt;
+}
+
+const HOME = env('MIHOMO_LUCI_HOME', '/etc/mihomo');
+const CONFIG = HOME + '/config.yaml';
+const CANDIDATE = HOME + '/config.yaml.new';
+const BACKUP_DIR = HOME + '/backup';
+const STATE_DIR = HOME + '/.luci';
+const DISABLED = STATE_DIR + '/disabled.json';
+const BIN = env('MIHOMO_LUCI_BIN', '/usr/bin/mihomo-ebpf');
+const INIT = env('MIHOMO_LUCI_INIT', '/etc/init.d/mihomo');
+const SERVICE = env('MIHOMO_LUCI_SERVICE', 'mihomo');
+const RUN_DIR = env('MIHOMO_LUCI_RUN', '/var/run/mihomo-luci');
+const LOCK = RUN_DIR + '/lock';
+const JOB_DIR = RUN_DIR + '/jobs';
+const YQ = env('MIHOMO_LUCI_YQ', '/usr/bin/yq');
+const JOB_BIN = env('MIHOMO_LUCI_JOB', '/usr/libexec/mihomo-luci/apply-job');
+const START_TIMEOUT = +env('MIHOMO_LUCI_START_TIMEOUT', '15');
+const BACKUP_KEEP = 10;
+const LOG_TAG = 'mihomo-ebpf';
+const LEASES = env('MIHOMO_LUCI_LEASES', '/tmp/dhcp.leases');
+const BIN_PREV = BIN + '.prev';
+const TEMPLATE = env('MIHOMO_LUCI_TEMPLATE', '/usr/share/mihomo-luci/template.yaml');
+const UCI_DIR = env('MIHOMO_LUCI_UCI_DIR', '/etc/config');
+const UCI_CONF = 'mihomo';
+const CORE_LATEST = RUN_DIR + '/core-latest.json';
+const CURL = env('MIHOMO_LUCI_CURL', '/usr/bin/curl');
+// 非空时代替 https://github.com/<repo>/releases/download/<tag>/（测试用本地目录）
+const RELEASE_BASE = env('MIHOMO_LUCI_RELEASE_BASE', '');
+
+export { HOME, CONFIG, CANDIDATE, BACKUP_DIR, STATE_DIR, DISABLED, BIN, INIT, SERVICE, RUN_DIR, LOCK, JOB_DIR, YQ, JOB_BIN,
+	START_TIMEOUT, BACKUP_KEEP, LOG_TAG, LEASES, BIN_PREV, TEMPLATE, UCI_DIR, UCI_CONF, CORE_LATEST, CURL, RELEASE_BASE };

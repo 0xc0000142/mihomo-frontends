@@ -5,7 +5,7 @@ mihomo（[liuran001/mihomo](https://github.com/liuran001/mihomo)，smart + eBPF 
 ```
 shared/   平台无关的资源（配置模板等）
 magisk/   Magisk / KernelSU 模块封装（KSU WebUI 管理界面）
-luci/     OpenWrt LuCI 应用（迁入中，当前在 luci-app-mihomo-ebpf 仓库）
+luci/     OpenWrt LuCI 应用（luci-app-mihomo-ebpf）
 ```
 
 ## Magisk / KernelSU 模块（`magisk/`）
@@ -25,6 +25,10 @@ luci/     OpenWrt LuCI 应用（迁入中，当前在 luci-app-mihomo-ebpf 仓�
 ```sh
 sh magisk/build.sh        # 需要 zip；输出 dist/mihomo-ebpf-magisk-<版本>.zip
 ```
+
+CI：push 或打 v* tag 会同时构建 Magisk zip 与 LuCI apk，tag 构建自动发 Release（见 .github/workflows/build.yml）。
+
+模板是单一来源：`shared/template.yaml` 是唯一副本，luci 与 magisk 构建/部署时由脚本同步（`luci/scripts/sync-template.sh`、`magisk/build.sh`）。
 
 ### 手动打包（无 zip 工具时）
 

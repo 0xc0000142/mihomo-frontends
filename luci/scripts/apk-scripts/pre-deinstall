@@ -1,0 +1,6 @@
+#!/bin/sh
+# 卸载前：停止并禁用服务（/etc/mihomo 与内核不删除）
+[ -x /etc/init.d/mihomo ] || exit 0
+/etc/init.d/mihomo stop 2>/dev/null
+/etc/init.d/mihomo disable 2>/dev/null
+exit 0
