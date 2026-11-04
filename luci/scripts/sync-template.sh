@@ -10,6 +10,7 @@ if [ ! -f "$SRC" ]; then
 	exit 1
 fi
 if ! cmp -s "$SRC" "$DST" 2>/dev/null; then
+	mkdir -p "$(dirname "$DST")"
 	cp "$SRC" "$DST"
 	echo "已同步模板 shared/template.yaml → $DST"
 fi
