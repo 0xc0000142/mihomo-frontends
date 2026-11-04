@@ -11,7 +11,8 @@ fi
 mkdir -p $TOOLS/bin
 # meson 用独立的 venv 安装，不改动系统
 [ -x $TOOLS/venv/bin/meson ] || { python3 -m venv $TOOLS/venv && $TOOLS/venv/bin/pip install -q meson; }
-[ -d $TOOLS/apk-src ] || git clone -q https://gitlab.alpinelinux.org/alpine/apk-tools.git $TOOLS/apk-src
+# 官方镜像在 GitHub（CI 上 gitlab.alpinelinux.org 反爬会拒绝 clone）；本地两个都可以
+[ -d $TOOLS/apk-src ] || git clone -q "${APK_GIT:-https://github.com/alpinelinux/apk-tools.git}" $TOOLS/apk-src
 git -C $TOOLS/apk-src checkout -q $APK_REV
 cd $TOOLS/apk-src
 rm -rf build
