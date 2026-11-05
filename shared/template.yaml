@@ -1,10 +1,13 @@
 # ============================================================
-# luci-app-mihomo-ebpf 内置模板（适配 liuran001/mihomo：eBPF 入站 + Smart 策略组）
-# 由 LuCI「向导」渲染：以 #@ 开头的行会换成订阅、面板密钥、镜像地址与下联接口，其余原样写入。
+# mihomo 内置模板（适配 liuran001/mihomo：eBPF 入站 + Smart 策略组）
+# 结构来自实际使用中的手机/PC 配置：多机场订阅 → 地区 Smart 组 → 分应用策略组 → geosite 分流。
+# 由 LuCI「向导」与 Magisk 模块向导渲染：以 #@ 开头的行会换成订阅、面板密钥、镜像地址与下联接口，其余原样写入。
 # 渲染结果是普通的 mihomo 配置，之后可以在「订阅」「策略组」「配置文件」等页面继续修改。
-#   - 透明代理：eBPF hybrid，本机流量走 cgroup，下联网桥走 packet_rewrite；国内 IP 在内核直连
-#   - DNS：redir-host，下联的 53 端口由 DNS_Hijack 出站接管，国内域名用国内上游
+#   - 透明代理：eBPF hybrid，本机流量走 cgroup，下联走 packet_rewrite；国内 IP 在内核直连
+#   - DNS：redir-host，53 端口由 DNS_Hijack 出站接管，国内域名用国内上游，海外走「dns」组
 #   - 规则集与面板走 GitHub 镜像（向导里的「镜像前缀」，为空时直连 GitHub）
+#   - 不含任何订阅地址或密钥
+# 参考文档：https://wiki.metacubex.one/config
 # ============================================================
 
 # 锚点：订阅（proxy-providers）公共设置
@@ -54,6 +57,11 @@ external-controller: 0.0.0.0:9090
 external-ui: ./dashboard
 #@ui-url
 
+# Smart 内核可选项（需要时取消注释）：
+#   profile.smart-collector-size: 100   # 择优数据收集文件上限（MB）
+#   lgbm-auto-update: true              # LightGBM 模型自动更新（需能访问外网）
+#   lgbm-update-interval: 72
+#   lgbm-url: "https://github.com/vernesong/mihomo/releases/download/LightGBM-Model/Model.bin"
 profile:
   store-selected: true
   store-fake-ip: true
@@ -179,7 +187,34 @@ rules:
   # 下联设备的 DNS 请求交给 dns 模块
   - DST-PORT,53,DNS_Hijack
   - DST-PORT,22,DIRECT
+  # 支付宝香港直连
+  - DOMAIN-SUFFIX,alipayhk.com,DIRECT
+  - DOMAIN-SUFFIX,alipay.hk,DIRECT
+  # 海外手机卡（eSIM / 漫游）的运营商服务走对应地区，否则激活、WiFi Calling 会失败
+  # 英国：mcc234、Vodafone / VOXI、EE / CMLink UK、giffgaff
+  - DOMAIN-KEYWORD,mcc234,英国
+  - DOMAIN-SUFFIX,entsrv-uk.vodafone.com,英国
+  - DOMAIN-SUFFIX,vuk-gto.prod.ondemandconnectivity.com,英国
+  - DOMAIN,vfgb.idemia.io,英国
+  - DOMAIN-SUFFIX,ct.ee.co.uk,英国
+  - IP-CIDR,88.82.0.0/19,英国,no-resolve
+  - IP-CIDR,148.252.160.0/19,英国,no-resolve
+  - IP-CIDR,46.68.0.0/17,英国,no-resolve
+  - IP-CIDR,87.194.0.0/16,英国,no-resolve
+  - IP-CIDR,31.94.0.0/16,英国,no-resolve
+  # 德国：O2 DE、Vodafone DE
+  - IP-CIDR,62.52.0.0/14,德国,no-resolve
+  - IP-CIDR,213.20.0.0/16,德国,no-resolve
+  - IP-CIDR,139.7.0.0/16,德国,no-resolve
+  # 香港：mcc454、CSL / 和记 / SmarTone
+  - DOMAIN-KEYWORD,mcc454,香港
+  - DOMAIN,csl.prod.ondemandconnectivity.com,香港
+  - DOMAIN,hhk.prod.ondemandconnectivity.com,香港
+  - DOMAIN,snr.prod.ondemandconnectivity.com,香港
+  - IP-CIDR,107.178.224.0/19,香港,no-resolve
+  # 广告拦截
   - RULE-SET,AWAvenue-Ads,广告拦截
+  # 应用分流
   - GEOSITE,category-scholar-!cn,学术
   - GEOSITE,category-ai-!cn,境外AI
   - GEOSITE,apple,Apple

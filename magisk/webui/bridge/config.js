@@ -556,19 +556,46 @@
     return rules.some((rule) => typeof rule === 'string' && pattern.test(rule));
   }
 
+  // 旧写法（与 LuCI ebpf_normalize 一致）：顶层 dns-mode / bypass-private-address 作为各角色缺省值，ipv6-mode 换成 ipv6。
+  const LISTENER_LEGACY = ['dns-mode', 'bypass-private-address', 'ipv6-mode', 'tcp-splice'];
+
+  function legacyListenerKeys(listener) {
+    if (!isObject(listener)) return [];
+    const keys = LISTENER_LEGACY.filter((key) => listener[key] !== undefined);
+    for (const role of ['local', 'shared']) if (isObject(listener[role]) && listener[role]['ipv6-mode'] !== undefined) keys.push(role + '.ipv6-mode');
+    return keys;
+  }
+
+  function tailnetPresent(data) {
+    const proxies = Array.isArray(data.proxies) ? data.proxies : [];
+    return proxies.some((item) => isObject(item) && item.type === 'tailscale');
+  }
+
+  const TAILNET_CIDRS = ['100.64.0.0/10', 'fd7a:115c:a1e0::/48'];
+
   function buildListener(data, current, host) {
     const ipcidr = Object.entries(isObject(data['rule-providers']) ? data['rule-providers'] : {})
       .filter(([, item]) => isObject(item) && item.behavior === 'ipcidr').map(([name]) => name);
     const base = isObject(current) ? current : {};
+    const tailnet = tailnetPresent(data);
     const role = (name, defaults) => {
       const source = isObject(base[name]) ? base[name] : {};
       const result = Object.assign({}, defaults);
+      for (const key of ['dns-mode', 'bypass-private-address']) if (base[key] !== undefined) result[key] = base[key];
       for (const [key, value] of Object.entries(source)) {
-        if (['enable', 'enabled', 'interface', 'exclude-package'].includes(key)) continue;
-        if (name === 'local' && key === 'dns-mode') continue;
+        if (['enable', 'enabled', 'interface', 'exclude-package', 'ipv6-mode'].includes(key)) continue;
         result[key] = value;
       }
+      if (source['ipv6-mode'] !== undefined && source.ipv6 === undefined) result.ipv6 = source['ipv6-mode'] !== 'off';
+      // 本机 DNS 由模块按「应用绕过」策略生成（respect_policy），这里不保留
+      if (name === 'local') delete result['dns-mode'];
       if (host && host.ipv6 === false) result.ipv6 = false;
+      // 有 Tailscale 出站时，Tailnet 地址段必须进入 mihomo，不能当作私网在内核直连
+      if (tailnet) {
+        const exclude = Array.isArray(result['bypass-exclude']) ? result['bypass-exclude'].slice() : [];
+        for (const cidr of TAILNET_CIDRS) if (!exclude.includes(cidr)) exclude.push(cidr);
+        result['bypass-exclude'] = exclude;
+      }
       return result;
     };
     const listener = { name: String(base.name || 'ebpf-in'), type: 'ebpf' };
@@ -613,10 +640,18 @@
         if (Y.isMap(item)) for (const pair of item.items) if (isMergeKey(pair.key)) listenerFlow = true;
       }
     }
-    const listenerOk = ebpf.length === 1 && listeners.length === 1 && !listenerFlow;
+    const legacy = ebpf.length === 1 ? legacyListenerKeys(ebpf[0]) : [];
+    const tailnetMissing = ebpf.length === 1 && tailnetPresent(data) && ['local', 'shared'].some((role) => {
+      const exclude = isObject(ebpf[0][role]) && Array.isArray(ebpf[0][role]['bypass-exclude']) ? ebpf[0][role]['bypass-exclude'] : [];
+      return !TAILNET_CIDRS.every((cidr) => exclude.includes(cidr));
+    });
+    const listenerOk = ebpf.length === 1 && listeners.length === 1 && !listenerFlow && !legacy.length && !tailnetMissing;
     if (!listenerOk) {
       const removed = listeners.length - ebpf.length;
-      const detail = ebpf.length ? '整理为模块可接管的单个 eBPF listener' : '新增 eBPF 透明代理入口（本机 cgroup + 共享 packet_rewrite）';
+      const detail = !ebpf.length ? '新增 eBPF 透明代理入口（本机 cgroup + 共享 packet_rewrite）'
+        : legacy.length ? '把旧写法 ' + legacy.join('、') + ' 展开到 local/shared' + (tailnetMissing ? '，并让 Tailnet 地址进入 mihomo' : '')
+        : tailnetMissing ? 'Tailnet 地址（100.64.0.0/10）加入 bypass-exclude，避免被当作私网直连'
+        : '整理为模块可接管的单个 eBPF listener';
       step('ebpf', ebpf.length ? '规范 eBPF 入站' : '添加 eBPF 入站',
         detail + (removed > 0 ? '，移除 ' + removed + ' 个不适用于手机的 listener' : ''), false, () => {
           const built = buildListener(data, ebpf[0], info);

@@ -211,10 +211,13 @@
     for (const line of template.split(/\r?\n/)) {
       const marker = line.trim();
       if (marker === '#@providers') {
+        // 与 LuCI 向导一致：沿用 p 锚点、./proxy_provider/ 路径、节点名加 [订阅名] 前缀
         for (const subscription of payload.subscriptions) {
-          output.push('  ' + JSON.stringify(subscription.name) + ':', '    <<: *p', '    url: ' + JSON.stringify(subscription.url));
-          if (subscription.ua) output.push('    header: {User-Agent: [' + JSON.stringify(subscription.ua) + ']}');
-          output.push('    path: ' + JSON.stringify('./providers/' + encodeURIComponent(subscription.name) + '.yaml'));
+          output.push('  ' + JSON.stringify(subscription.name) + ':', '    <<: *p',
+            '    path: ' + JSON.stringify('./proxy_provider/' + encodeURIComponent(subscription.name) + '.yaml'),
+            '    url: ' + JSON.stringify(subscription.url),
+            '    override:', '      additional-prefix: ' + JSON.stringify('[' + subscription.name + ']'));
+          if (subscription.ua) output.push('    header:', '      User-Agent: [' + JSON.stringify(subscription.ua) + ']');
         }
       } else if (marker === '#@use') {
         for (const subscription of payload.subscriptions) output.push('    - ' + JSON.stringify(subscription.name));

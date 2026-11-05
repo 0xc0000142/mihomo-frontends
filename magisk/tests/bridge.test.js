@@ -745,8 +745,9 @@ test('template escapes YAML-sensitive fields and supports explicit secret, UI an
   assert.equal(response.ok, true);
   assert.ok(response.content.includes('  ' + JSON.stringify(subscription.name) + ':'));
   assert.ok(response.content.includes('    - ' + JSON.stringify(subscription.name)));
-  assert.ok(response.content.includes('    path: ' + JSON.stringify('./providers/' + encodeURIComponent(subscription.name) + '.yaml')));
-  assert.ok(response.content.includes('    header: {User-Agent: [' + JSON.stringify(subscription.ua) + ']}'));
+  assert.ok(response.content.includes('    path: ' + JSON.stringify('./proxy_provider/' + encodeURIComponent(subscription.name) + '.yaml')));
+  assert.ok(response.content.includes('      additional-prefix: ' + JSON.stringify('[' + subscription.name + ']')));
+  assert.ok(response.content.includes('    header:\n      User-Agent: [' + JSON.stringify(subscription.ua) + ']'));
   assert.ok(response.content.includes('secret: ' + JSON.stringify(secret)));
   assert.ok(response.content.includes('    url: "https://rules.example/fakeip.mrs"'));
   assert.doesNotMatch(response.content, /^external-ui-url:/m);
