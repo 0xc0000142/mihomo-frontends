@@ -1,0 +1,106 @@
+#!/bin/sh
+# Sub-Store 按需安装：substore-install all|node|backend|frontend
+# 由 luci.mihomo 的 substore_install 在后台拉起；进度写日志，结束时写结果文件（ok 或错误说明）。
+# node 用系统包管理器安装（apk / opkg），后端与前端从 GitHub 下载（走「内核」页设置的镜像）。
+RUN=/var/run/mihomo-luci
+DIR=${MIHOMO_SUBSTORE_DIR:-/etc/mihomo/substore}
+LOG=$RUN/substore-install.log
+RESULT=$RUN/substore-install.result
+PID=$RUN/substore-install.pid
+BACKEND_REPO=sub-store-org/Sub-Store
+FRONTEND_REPO=sub-store-org/Sub-Store-Front-End
+
+mkdir -p "$RUN" "$DIR" && chmod 700 "$DIR" || exit 1
+echo $$ >"$PID"
+rm -f "$RESULT"
+: >"$LOG"
+
+say() { echo "$*" >>"$LOG"; }
+finish() {
+	printf '%s\n' "$1" >"$RESULT"
+	rm -f "$PID"
+	exit "$2"
+}
+die() { say "失败：$1"; finish "$1" 1; }
+
+mirror=$(uci -q get mihomo.core.mirror)
+case "$mirror" in http://*|https://*) ;; *) mirror= ;; esac
+
+# 先走镜像，失败再直连
+fetch() {
+	if [ -n "$mirror" ]; then
+		curl -fSL --noproxy '*' -m 600 -o "$2" "$mirror$1" 2>>"$LOG" && return 0
+		say "镜像下载失败，改为直连"
+	fi
+	curl -fSL -m 600 -o "$2" "$1" 2>>"$LOG"
+}
+
+release_tag() {
+	url="https://api.github.com/repos/$1/releases/latest"
+	{ { [ -n "$mirror" ] && curl -fsSL --noproxy '*' -m 30 "$mirror$url" 2>/dev/null; } || curl -fsSL -m 30 "$url" 2>/dev/null; } |
+		grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n 1 | sed 's/.*"\([^"]*\)"$/\1/'
+}
+
+install_node() {
+	if command -v node >/dev/null 2>&1 && node -v >/dev/null 2>&1; then
+		say "已安装 node $(node -v)"
+		return 0
+	fi
+	say '正在用包管理器安装 node（体积较大，请确认闪存空间足够）…'
+	if command -v apk >/dev/null 2>&1; then
+		apk update >>"$LOG" 2>&1
+		apk add node >>"$LOG" 2>&1 || die '安装 node 失败：软件源里可能没有本机架构的 node，或空间不足（详见日志）'
+	elif command -v opkg >/dev/null 2>&1; then
+		opkg update >>"$LOG" 2>&1
+		opkg install node >>"$LOG" 2>&1 || die '安装 node 失败：软件源里可能没有本机架构的 node，或空间不足（详见日志）'
+	else
+		die '找不到包管理器（apk 或 opkg）'
+	fi
+	node -v >/dev/null 2>&1 || die 'node 安装后无法运行'
+	say "node $(node -v) 安装完成"
+}
+
+install_backend() {
+	say '正在下载 Sub-Store 后端…'
+	tag=$(release_tag "$BACKEND_REPO")
+	fetch "https://github.com/$BACKEND_REPO/releases/latest/download/sub-store.bundle.js" "$DIR/sub-store.bundle.js.new" ||
+		{ rm -f "$DIR/sub-store.bundle.js.new"; die '下载 Sub-Store 后端失败'; }
+	[ "$(wc -c <"$DIR/sub-store.bundle.js.new")" -gt 100000 ] || { rm -f "$DIR/sub-store.bundle.js.new"; die 'Sub-Store 后端文件不完整'; }
+	mv -f "$DIR/sub-store.bundle.js.new" "$DIR/sub-store.bundle.js" && echo "${tag:-latest}" >"$DIR/backend.version"
+	say "后端 ${tag:-latest} 下载完成"
+}
+
+install_frontend() {
+	say '正在下载 Sub-Store 前端…'
+	command -v unzip >/dev/null 2>&1 || die '缺少 unzip（apk add unzip 或 opkg install unzip）'
+	tag=$(release_tag "$FRONTEND_REPO")
+	work=$DIR/.front.$$
+	rm -rf "$work"; mkdir -p "$work" || die '无法创建临时目录'
+	fetch "https://github.com/$FRONTEND_REPO/releases/latest/download/dist.zip" "$work/dist.zip" || { rm -rf "$work"; die '下载 Sub-Store 前端失败'; }
+	unzip -q -o "$work/dist.zip" -d "$work/out" >>"$LOG" 2>&1 || { rm -rf "$work"; die '解压 Sub-Store 前端失败'; }
+	index=$(find "$work/out" -type f -name index.html | head -n 1)
+	[ -n "$index" ] || { rm -rf "$work"; die '前端压缩包里没有 index.html'; }
+	rm -rf "$DIR/frontend.old"
+	[ -d "$DIR/frontend" ] && mv "$DIR/frontend" "$DIR/frontend.old"
+	mv "${index%/index.html}" "$DIR/frontend" && rm -rf "$DIR/frontend.old" && echo "${tag:-latest}" >"$DIR/frontend.version"
+	rm -rf "$work"
+	say "前端 ${tag:-latest} 下载完成"
+}
+
+command -v curl >/dev/null 2>&1 || die '缺少 curl'
+case "${1:-all}" in
+	all) install_node; install_backend; install_frontend ;;
+	node) install_node ;;
+	backend) install_backend ;;
+	frontend) install_frontend ;;
+	*) die '参数无效' ;;
+esac
+
+# 本机模式下装好后（重新）启动服务
+if [ "$(uci -q get mihomo.substore.mode)" = local ] && [ -x /etc/init.d/mihomo-substore ]; then
+	say '正在启动 Sub-Store…'
+	/etc/init.d/mihomo-substore enable >>"$LOG" 2>&1
+	/etc/init.d/mihomo-substore restart >>"$LOG" 2>&1
+fi
+say '完成'
+finish ok 0

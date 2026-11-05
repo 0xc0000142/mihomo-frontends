@@ -24,7 +24,7 @@ type Config struct {
 	LAN bool `json:"lan"`
 	// AllowCIDRs 限制局域网来源；为空时只允许私网地址（RFC 1918、链路本地、ULA）
 	AllowCIDRs []string `json:"allow_cidrs"`
-	// RequirePassword 为 false 时局域网来源免密；本机回环地址始终需要密码
+	// RequirePassword 为 false（或没有设置密码）时本机与局域网来源免密
 	RequirePassword bool `json:"require_password"`
 	// Tailscale 为 true 时接受内核 tailscale serve 经 unix socket 转发的请求
 	Tailscale bool `json:"tailscale"`

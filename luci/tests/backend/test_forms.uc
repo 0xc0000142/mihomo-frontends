@@ -287,6 +287,15 @@ ok(index(fs.readfile(tmp), '# 不要填写 dialer-proxy') >= 0, '保留代理里
 ok(run([{ op: 'tailscale.set', name: 'TS-Server', data: { hostname: 'a b' } }]).error, '拒绝非法主机名');
 ok(run([{ op: 'tailscale.set', name: 'Nope', data: {} }]).error, '拒绝不存在的 Tailscale 代理');
 
+// serve 端口转发：规整结尾的 /，拒绝重复端口、域名目标；空列表删除字段
+r = run([{ op: 'tailscale.set', name: 'TS-Server', data: { serve: [{ port: 8080, target: 'http://127.0.0.1:3000/' }, { port: '9000', target: 'unix:run/app.sock' }] } }]);
+eq([r.error, X().proxies[1].serve], [null, [{ port: 8080, target: 'http://127.0.0.1:3000' }, { port: 9000, target: 'unix:run/app.sock' }]], 'tailscale serve');
+ok(valid(), 'serve 后 -t 通过');
+ok(run([{ op: 'tailscale.set', name: 'TS-Server', data: { serve: [{ port: 1, target: 'unix:a' }, { port: 1, target: 'unix:b' }] } }]).error, '拒绝重复的 serve 端口');
+ok(run([{ op: 'tailscale.set', name: 'TS-Server', data: { serve: [{ port: 81, target: 'http://example.com:80' }] } }]).error, 'serve 目标只接受 IP');
+r = run([{ op: 'tailscale.set', name: 'TS-Server', data: { serve: [] } }]);
+eq([r.error, X().proxies[1].serve], [null, null], '清空 serve');
+
 // 新增：追加出站，Tailnet 规则插在开头的 DST-PORT 规则之后；已有 bypass-exclude 时不重复
 r = run([{ op: 'tailscale.add', name: 'TS2', data: { hostname: 'node2' } }]);
 x = X();

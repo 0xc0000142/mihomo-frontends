@@ -1,0 +1,35 @@
+#!/bin/sh /etc/rc.common
+# Sub-Store（订阅管理），由 luci-app-mihomo-ebpf 提供。在 LuCI「服务 → Mihomo → Sub-Store」里选择「在本机运行」并下载后启用。
+# 前端与接口在同一端口：前端在根路径，接口在 /<随机路径> 下，只有知道路径的人才能读取订阅。
+START=98
+STOP=11
+USE_PROCD=1
+
+DIR=/etc/mihomo/substore
+
+start_service() {
+	[ "$(uci -q get mihomo.substore.mode)" = local ] || return 0
+	node=$(command -v node)
+	if [ -z "$node" ] || [ ! -s "$DIR/sub-store.bundle.js" ]; then
+		logger -t mihomo-substore '还没有安装 node 或 Sub-Store，请在 LuCI 的 Sub-Store 页面下载'
+		return 1
+	fi
+	path=$(uci -q get mihomo.substore.path)
+	if [ -z "$path" ]; then
+		logger -t mihomo-substore '缺少后端路径，请在 LuCI 的 Sub-Store 页面保存一次设置'
+		return 1
+	fi
+	port=$(uci -q get mihomo.substore.port)
+	host=127.0.0.1
+	[ "$(uci -q get mihomo.substore.lan)" = 1 ] && host=0.0.0.0
+	mkdir -p "$DIR/data"
+	procd_open_instance
+	procd_set_param command "$node" "$DIR/sub-store.bundle.js"
+	procd_set_param env SUB_STORE_BACKEND_API_HOST="$host" SUB_STORE_BACKEND_API_PORT="${port:-3001}" \
+		SUB_STORE_BACKEND_MERGE=true SUB_STORE_FRONTEND_BACKEND_PATH="/$path" SUB_STORE_DATA_BASE_PATH="$DIR/data"
+	[ -f "$DIR/frontend/index.html" ] && procd_append_param env SUB_STORE_FRONTEND_PATH="$DIR/frontend"
+	procd_set_param respawn 3600 5 5
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}

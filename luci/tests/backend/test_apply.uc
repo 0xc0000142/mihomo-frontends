@@ -42,6 +42,13 @@ ok(index(v.error, 'yaml') >= 0, '返回 mihomo 的错误信息', v.error);
 eq(length(filter(fs.lsdir(P.RUN_DIR) ?? [], (n) => match(n, /^validate-/))), 0, '校验后清理临时文件');
 eq(A.validate_content('').ok, false, '空内容直接拒绝');
 
+// 只查 YAML 语法（yq），返回出错行号
+v = A.yaml_check(ORIG);
+eq([v.ok, v.valid], [true, true], 'yaml_check 合法');
+v = A.yaml_check('mode: rule\nproxies:\n  - a\n b: [\n');
+ok(v.ok && v.valid === false && v.line >= 1 && index(v.error, 'Error') < 0, 'yaml_check 返回行号与精简错误', v);
+eq(length(filter(fs.lsdir(P.RUN_DIR) ?? [], (n) => match(n, /^lint-/))), 0, 'yaml_check 清理临时文件');
+
 eq(A.config_read().content, ORIG, 'config_read 返回内容');
 
 // 启动测试实例

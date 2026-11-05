@@ -44,7 +44,20 @@ function setup(opts) {
 		},
 		controller: async () => ({ base: 'http://192.168.77.1:9090' }),
 		stream: (path, cb) => { calls.stream = path; onLog = cb; return { close() { calls.closed = true; } }; },
-		get: async p => { calls.gets.push(p); return { delay: 0 }; }
+		get: async p => {
+			if (p.startsWith('/tailscale')) {
+				if (!opts.kernel) throw Object.assign(new Error('HTTP 404'), { status: 404 });
+				calls.status = (calls.status || 0) + 1;
+				return { name: 'TS B', state: logged ? 'Running' : 'NeedsLogin', login: logged ? 'k@example.com' : undefined };
+			}
+			calls.gets.push(p);
+			return { delay: 0 };
+		},
+		request: async (method, p) => {
+			calls.requests = (calls.requests || []).concat(method + ' ' + p);
+			if (!opts.kernel) throw Object.assign(new Error('HTTP 404'), { status: 404 });
+			return { name: 'TS B', state: 'NeedsLogin', authURL: 'https://login.tailscale.com/a/kernel1' };
+		}
 	};
 	const ui = { showModal: (title, body) => calls.modal.push({ title, body }), hideModal: () => { calls.hidden = true; } };
 	const notes = [];
@@ -87,5 +100,19 @@ function setup(opts) {
 	modal[2].children[0].click();
 	await tick();
 	assert.deepStrictEqual(t.calls.service, [ 'start', 'restart' ], '重试时重启服务');
+	// 新内核：登录接口直接返回链接，不订阅日志；轮询内核状态直到 Running
+	t = setup({ kernel: true });
+	t.st.tsLogin('TS B');
+	await tick();
+	assert.deepStrictEqual(t.calls.requests, [ 'POST /tailscale/TS%20B/login?wait=20' ]);
+	assert.strictEqual(t.calls.stream, undefined, '不再订阅日志');
+	assert.ok(text(t.calls.modal[0].body[1]).includes('https://login.tailscale.com/a/kernel1'), '显示内核返回的链接');
+	await tick();
+	assert.ok(t.calls.status >= 1 && !t.calls.hidden, '未登录时继续轮询');
+	t.login();
+	await tick();
+	await tick();
+	assert.ok(t.calls.hidden && t.calls.reloaded, '内核状态 Running 后关闭弹窗');
+	assert.ok(t.notes.some(n => n.includes('k@example.com')));
 	console.log('test_tailscale ok');
 })().catch(e => { console.error(e); process.exit(1); });

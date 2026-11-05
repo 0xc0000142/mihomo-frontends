@@ -170,6 +170,47 @@ logs() {
   exit 0
 }
 
+# 诊断信息：设备、root 管理器、模块、内核、网络与最近日志。脱敏在网页端统一处理。
+diag() {
+  section() { printf '\n== %s ==\n' "$1"; }
+  prop() { getprop "$1" 2>/dev/null; }
+  section 设备
+  printf '型号: %s %s (%s)\n' "$(prop ro.product.brand)" "$(prop ro.product.model)" "$(prop ro.product.device)"
+  printf 'Android: %s (SDK %s)  ROM: %s\n' "$(prop ro.build.version.release)" "$(prop ro.build.version.sdk)" "$(prop ro.build.display.id)"
+  printf 'ABI: %s  Linux: %s\n' "$(prop ro.product.cpu.abi)" "$(uname -r 2>/dev/null)"
+  printf 'SELinux: %s\n' "$(getenforce 2>/dev/null)"
+  section Root
+  if [ -x /data/adb/ksud ]; then printf 'KernelSU: %s\n' "$(/data/adb/ksud -V 2>/dev/null | head -n 1)"; fi
+  if [ -x /data/adb/apd ]; then printf 'APatch: %s\n' "$(/data/adb/apd -V 2>/dev/null | head -n 1)"; fi
+  if command -v magisk >/dev/null 2>&1; then printf 'Magisk: %s (%s)\n' "$(magisk -v 2>/dev/null)" "$(magisk -V 2>/dev/null)"; fi
+  section 模块
+  grep -E '^(version|versionCode)=' "$MODDIR/module.prop" 2>/dev/null
+  [ -e "$MODDIR/disable" ] && echo '模块已在管理器中禁用'
+  grep -vE '^(wifi_ssids|bypass_packages)(_b64)?=' "$SETTINGS" 2>/dev/null | head -n 60
+  section 内核
+  if [ -x "$BIN" ]; then "$BIN" -v 2>/dev/null | head -n 2; else echo '未安装'; fi
+  if [ -f "$PID_FILE" ]; then
+    pid=$(cat "$PID_FILE" 2>/dev/null)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      printf '运行中 PID %s，内存 %s\n' "$pid" "$(grep -E '^VmRSS' "/proc/$pid/status" 2>/dev/null | tr -s ' \t' ' ')"
+    else
+      echo '未运行（PID 文件残留）'
+    fi
+  else
+    echo '未运行'
+  fi
+  section 网络
+  ip -o addr show 2>/dev/null | awk '{print $2, $3, $4}' | head -n 40
+  echo '-- ip rule'
+  ip rule show 2>/dev/null | head -n 40
+  echo '-- 默认路由'
+  ip route show table all 2>/dev/null | grep -E '^default' | head -n 10
+  section 最近日志
+  tail -n "$1" "$LOG_FILE" 2>/dev/null
+  logcat -d -s 'mihomo:*' 2>/dev/null | tail -n 30
+  exit 0
+}
+
 # 策略组图标：浏览器因跨域读不到时由这里下载，输出单行 base64（最多 256 KB）
 icon() {
   url=$1
@@ -205,7 +246,10 @@ api() {
   else
     set --
   fi
-  exec "$curl_bin" --disable --silent --show-error --globoff --noproxy '*' --connect-timeout 3 --max-time 8 \
+  timeout=${MIHOMO_API_TIMEOUT:-8}
+  case "$timeout" in ''|*[!0-9]*) timeout=8 ;; esac
+  [ "$timeout" -ge 1 ] && [ "$timeout" -le 90 ] || timeout=8
+  exec "$curl_bin" --disable --silent --show-error --globoff --noproxy '*' --connect-timeout 3 --max-time "$timeout" \
     --request "$method" --header "Authorization: Bearer ${MIHOMO_SECRET:-}" \
     --write-out '\n__MIHOMO_HTTP__:%{http_code}' --url "$url" "$@"
 }
@@ -215,11 +259,12 @@ case "${1:-}" in
   import-read) import_read ;;
   validate) [ "$#" -eq 2 ] || fail '参数无效'; validate "$2" ;;
   logs) logs "${2:-200}" ;;
+  diag) diag 150 ;;
   controller) controller_lines ;;
   icon) [ "$#" -eq 2 ] || { echo '参数无效' >&2; exit 2; }; icon "$2" ;;
   api) [ "$#" -eq 3 ] || [ "$#" -eq 4 ] || { echo '参数无效' >&2; exit 2; }; shift; api "$@" ;;
   probe) probe ;;
   fetch) [ "$#" -ge 2 ] || fail '缺少链接'; fetch "$2" "${3:-}" ;;
   stage) [ "$#" -eq 3 ] || fail '参数无效'; stage "$2" "$3" ;;
-  *) fail '用法: host.sh probe|fetch|stage|read-config|import-read|validate|logs|controller|icon|api' ;;
+  *) fail '用法: host.sh probe|fetch|stage|read-config|import-read|validate|logs|diag|controller|icon|api' ;;
 esac

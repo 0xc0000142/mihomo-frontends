@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -180,8 +183,8 @@ func TestPasswordlessRules(t *testing.T) {
 	if code := f.do(lan("192.168.1.9"), "GET", "/", "", nil).Code; code != http.StatusOK {
 		t.Fatalf("LAN passwordless: %d", code)
 	}
-	if code := f.do(local(), "GET", "/", "", nil).Code; code != http.StatusSeeOther {
-		t.Fatalf("loopback must always need a password: %d", code)
+	if code := f.do(local(), "GET", "/", "", nil).Code; code != http.StatusOK {
+		t.Fatalf("loopback follows require_password: %d", code)
 	}
 	ts := caller{origin: originTailscale}
 	if code := f.do(ts, "GET", "/", "", map[string]string{tailscaleLogin: "alice@example.com"}).Code; code != http.StatusOK {
@@ -196,7 +199,7 @@ func TestPasswordlessRules(t *testing.T) {
 	if code := f.do(ts, "GET", "/", "", map[string]string{tailscaleLogin: "=?utf-8?q?alice@example.com?="}).Code; code != http.StatusOK {
 		t.Fatalf("encoded login: %d", code)
 	}
-	if response := f.do(local(), "POST", "/api/login", `{"password":"x"}`, apiHeaders); response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "尚未设置密码") {
+	if response := f.do(ts, "POST", "/api/login", `{"password":"x"}`, apiHeaders); response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "尚未设置密码") {
 		t.Fatalf("login without password set: %d %s", response.Code, response.Body.String())
 	}
 }
@@ -296,5 +299,38 @@ func bumpTime(t *testing.T, path string) {
 	later := info.ModTime().Add(2e9)
 	if err := os.Chtimes(path, later, later); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestStaticCompressionAndCaching(t *testing.T) {
+	config := defaultConfig()
+	config.RequirePassword = false
+	f := newFixture(t, config, "")
+	wasm := bytes.Repeat([]byte("wasm-module-bytes "), 4096)
+	name := "0123456789abcdef0123.wasm"
+	if err := os.WriteFile(filepath.Join(f.server.webroot, name), wasm, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	response := f.do(local(), "GET", "/"+name, "", map[string]string{"Accept-Encoding": "gzip, br"})
+	if response.Code != http.StatusOK || response.Header().Get("Content-Encoding") != "gzip" {
+		t.Fatalf("gzip response: %d %q", response.Code, response.Header().Get("Content-Encoding"))
+	}
+	if !strings.Contains(response.Header().Get("Cache-Control"), "immutable") {
+		t.Fatalf("hashed wasm should be immutable: %q", response.Header().Get("Cache-Control"))
+	}
+	reader, err := gzip.NewReader(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := io.ReadAll(reader)
+	if err != nil || !bytes.Equal(plain, wasm) {
+		t.Fatalf("decompressed body mismatch: %v", err)
+	}
+	if response.Body.Len() >= len(wasm)/4 {
+		t.Fatalf("compressed body too large: %d", response.Body.Len())
+	}
+	index := f.do(local(), "GET", "/", "", nil)
+	if index.Header().Get("Content-Encoding") != "" || index.Header().Get("Cache-Control") != "no-cache" {
+		t.Fatalf("index without gzip: %q %q", index.Header().Get("Content-Encoding"), index.Header().Get("Cache-Control"))
 	}
 }

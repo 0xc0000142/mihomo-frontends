@@ -371,3 +371,32 @@ test('tailscale webui publishes the management page on one outbound and advertis
   assert.throws(() => C.patch(content, [{ op: 'tailscale.webui', name: 'TS-B' }]), /enable/);
   assert.throws(() => C.patch(content, [{ op: 'tailscale.set', name: 'TS-B', values: { 'advertise-routes': ['nope'] } }]), /通告子网路由/);
 });
+
+test('tailscale serve replaces user forwards and keeps the management entry', () => {
+  let content = C.patch(rendered, [{ op: 'tailscale.add', name: 'TS', values: { hostname: 'node' } }]).content;
+  content = C.patch(content, [{ op: 'tailscale.webui', name: 'TS', enable: true }]).content;
+  content = C.patch(content, [{ op: 'tailscale.serve', name: 'TS', serve: [
+    { port: 8080, target: 'http://127.0.0.1:3000/' }, { port: 9000, target: 'unix:run/app.sock' },
+  ] }]).content;
+  assert.equal(JSON.stringify(plain(content).proxies.find((item) => item.name === 'TS').serve),
+    '[{"port":80,"target":"unix:run/webui.sock"},{"port":8080,"target":"http://127.0.0.1:3000"},{"port":9000,"target":"unix:run/app.sock"}]');
+  assert.equal(JSON.stringify(C.schema(content).tailscale[0].serve),
+    '[{"port":8080,"target":"http://127.0.0.1:3000"},{"port":9000,"target":"unix:run/app.sock"}]');
+  assert.throws(() => C.patch(content, [{ op: 'tailscale.serve', name: 'TS', serve: [{ port: 80, target: 'http://127.0.0.1:1' }] }]), /网页管理/);
+  assert.throws(() => C.patch(content, [{ op: 'tailscale.serve', name: 'TS', serve: [{ port: 81, target: 'http://example.com:1' }] }]), /http:\/\/IP/);
+  assert.throws(() => C.patch(content, [{ op: 'tailscale.serve', name: 'TS', serve: [{ port: 81, target: 'unix:a' }, { port: 81, target: 'unix:b' }] }]), /重复/);
+  content = C.patch(content, [{ op: 'tailscale.serve', name: 'TS', serve: [] }]).content;
+  assert.equal(JSON.stringify(plain(content).proxies.find((item) => item.name === 'TS').serve), '[{"port":80,"target":"unix:run/webui.sock"}]');
+  content = C.patch(content, [{ op: 'tailscale.webui', name: 'TS', enable: false }]).content;
+  assert.equal(plain(content).proxies.find((item) => item.name === 'TS').serve, undefined);
+});
+
+test('lint reports YAML errors with positions and never throws', () => {
+  assert.equal(C.lint('a: 1\nb: 2\n').problems.length, 0);
+  const bad = C.lint('a: 1\n  b: [1, 2\nc: 3\n').problems;
+  assert.ok(bad.length > 0);
+  assert.equal(bad[0].level, 'error');
+  assert.ok(bad.every((item) => item.line >= 1 && item.col >= 1), JSON.stringify(bad));
+  assert.match(C.lint('- 1\n- 2\n').problems[0].message, /映射/);
+  assert.equal(C.lint('').problems.length, 0);
+});

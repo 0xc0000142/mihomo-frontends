@@ -24,6 +24,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -91,11 +92,18 @@ internal object WebUiState {
         }
     }
 
-    private fun accept(status: JsonObject) {
+    // 最近一次服务端返回的原始设置；开关先在本地生效，保存失败时回退
+    private var raw = JsonObject(emptyMap())
+    private val saveLock = kotlinx.coroutines.sync.Mutex()
+    var pending by mutableStateOf(0)
+        private set
+
+    private fun accept(status: JsonObject, settingsToo: Boolean = true) {
         installed = status.boolean("installed")
         running = status.boolean("running")
         val values = status["settings"] as? JsonObject
-        if (values != null) {
+        if (values != null && settingsToo) {
+            raw = values
             settings = values.webUiSettings()
             addrs = values.objects("addrs").map { it.string("iface") to it.string("addr") }
         }
@@ -125,22 +133,50 @@ internal object WebUiState {
         accept(request("webuiSet", JsonObject(mapOf("settings" to JsonObject(values)))))
     }
 
-    fun set(key: String, value: JsonElement, message: String = "已保存") {
+    /** 开关类设置：界面立即切换，后台依次保存；只有最后一个请求的结果覆盖界面，失败时回退。 */
+    fun set(values: Map<String, JsonElement>, message: String = "已保存", after: (() -> Unit)? = null) {
         notice = ""
-        run("保存…") {
-            save(mapOf(key to value))
-            notice = message
+        error = ""
+        val before = raw
+        raw = JsonObject(raw + values)
+        settings = raw.webUiSettings()
+        pending++
+        scope.launch {
+            try {
+                saveLock.withLock {
+                    val status = request("webuiSet", JsonObject(mapOf("settings" to JsonObject(values))))
+                    accept(status, settingsToo = pending == 1)
+                }
+                notice = message
+                after?.invoke()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                raw = before
+                settings = before.webUiSettings()
+                error = failure.message ?: "保存失败"
+            } finally {
+                pending--
+            }
         }
     }
 
+    fun set(key: String, value: JsonElement, message: String = "已保存") = set(mapOf(key to value), message)
+
+    /** 密码只在经 Tailnet 访问且没有开启账号免密时强制；本机与局域网没有密码时自动免密。 */
     fun setEnabled(enabled: Boolean) {
-        notice = ""
-        run(if (enabled) "启动网页管理…" else "停止网页管理…") {
-            val passwordless = (settings.lan && !settings.requirePassword) || (settings.tailscale && settings.tailscaleNoPassword)
-            if (enabled && !settings.hasPassword && !passwordless) error("请先设置登录密码")
-            save(mapOf("enabled" to JsonPrimitive(enabled)))
-            notice = if (!enabled) "已停止" else if (running) "已启动" else "已保存，但服务没有运行，请查看日志"
+        if (enabled && settings.tailscale && !settings.tailscaleNoPassword && !settings.hasPassword) {
+            error = "已允许 Tailnet 访问：请先设置登录密码，或开启「Tailnet 账号免密」"
+            return
         }
+        val values = mutableMapOf<String, JsonElement>("enabled" to JsonPrimitive(enabled))
+        val passwordless = enabled && !settings.hasPassword && settings.requirePassword
+        if (passwordless) values["require_password"] = JsonPrimitive(false)
+        set(values, when {
+            !enabled -> "已停止"
+            passwordless -> "已启动；没有设置密码，本机与局域网可直接访问"
+            else -> "已启动"
+        })
     }
 
     fun setPassword(password: String) {
@@ -184,6 +220,37 @@ internal object WebUiState {
 internal object Dashboard {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     var opening by mutableStateOf(false)
+    var upgrading by mutableStateOf(false)
+
+    fun openUrl(url: String, onError: (String) -> Unit) {
+        scope.launch {
+            try {
+                request("openUrl", json("url" to url))
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                onError(failure.message ?: "无法打开浏览器")
+            }
+        }
+    }
+
+    /** 让内核重新下载面板（external-ui-url），完成后刷新浏览器里的面板即可。 */
+    fun upgrade(onDone: (String) -> Unit, onError: (String) -> Unit) {
+        if (upgrading) return
+        upgrading = true
+        scope.launch {
+            try {
+                request("dashboardUpgrade")
+                onDone("面板已更新，浏览器里刷新一下即可")
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                onError("更新面板失败：" + (failure.message ?: "未知错误"))
+            } finally {
+                upgrading = false
+            }
+        }
+    }
 
     fun open(onError: (String) -> Unit) {
         if (opening) return
@@ -224,10 +291,12 @@ fun WebUiPage(onBack: () -> Unit, onNavigate: (String) -> Unit) {
     var confirmDisable by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { state.load() }
     val idle = state.busy.isEmpty() && ts.busy.isEmpty()
+    // 开关在保存期间仍可操作；端口、密码等弹窗类操作等保存完成
+    val quiet = idle && state.pending == 0
     Page(title = "网页管理", navigationIcon = { BackIcon(onBack) }, actions = {
         BarAction(MiuixIcons.Regular.Refresh, "重新读取", enabled = idle) { state.load() }
     }) {
-        banner(state.busy.ifEmpty { ts.busy }, BannerKind.Progress, "busy")
+        banner(state.busy.ifEmpty { ts.busy }.ifEmpty { if (state.pending > 0) "保存中…" else "" }, BannerKind.Progress, "busy")
         banner(state.error.ifEmpty { ts.error }, BannerKind.Error, "error")
         banner(state.notice, BannerKind.Success, "notice")
         if (!state.loaded) return@Page
@@ -246,14 +315,22 @@ fun WebUiPage(onBack: () -> Unit, onNavigate: (String) -> Unit) {
             SwitchRow("启用网页管理", current.enabled, "在电脑或其它手机的浏览器里管理模块，功能与这里相同", enabled = idle) {
                 if (!it && state.remote) confirmDisable = true else state.setEnabled(it)
             }
-            InfoRow("服务状态", if (state.running) "运行中" else "未运行", valueColor = if (state.running) Tone.success else Tone.muted)
-            ArrowRow("端口", "改动后服务会重启", value = current.port.toString(), enabled = idle) { editPort = true }
+            InfoRow("服务状态", when {
+                state.pending > 0 && current.enabled != state.running -> if (current.enabled) "启动中…" else "停止中…"
+                state.running -> "运行中"
+                else -> "未运行"
+            }, valueColor = if (state.running) Tone.success else Tone.muted)
+            ArrowRow("端口", "改动后服务会重启", value = current.port.toString(), enabled = quiet) { editPort = true }
         }
         group("登录", "login") {
             ArrowRow("登录密码", "至少 6 个字符；修改后所有已登录的浏览器需要重新登录",
-                value = if (current.hasPassword) "已设置" else "未设置", enabled = idle) { editPassword = true }
-            if (current.hasPassword) ArrowRow("清除密码", "清除后只能在局域网免密或 Tailnet 免密时访问", enabled = idle) { clearPassword = true }
-            ArrowRow("登录有效期", "超过后需要重新输入密码", value = "${current.sessionHours} 小时", enabled = idle) { editHours = true }
+                value = if (current.hasPassword) "已设置" else "未设置", enabled = quiet) { editPassword = true }
+            if (current.hasPassword) ArrowRow("清除密码", "清除后本机与局域网免密访问；Tailnet 只能用账号免密访问", enabled = quiet) { clearPassword = true }
+            SwitchRow("本机和局域网访问需要密码", current.requirePassword && current.hasPassword,
+                if (current.hasPassword) "关闭后本机应用和同一网络里的设备都能直接管理" else "设置密码后才能开启", enabled = idle && current.hasPassword) {
+                state.set("require_password", JsonPrimitive(it))
+            }
+            ArrowRow("登录有效期", "超过后需要重新输入密码", value = "${current.sessionHours} 小时", enabled = quiet) { editHours = true }
         }
         group("局域网", "lan") {
             SwitchRow("允许局域网访问", current.lan, "关闭时只监听本机 127.0.0.1", enabled = idle) {
@@ -261,11 +338,7 @@ fun WebUiPage(onBack: () -> Unit, onNavigate: (String) -> Unit) {
             }
             if (current.lan) {
                 ArrowRow("允许的网段", "来源地址不在这些网段内时拒绝访问",
-                    value = if (current.allowCidrs.isEmpty()) "所有私网地址" else current.allowCidrs.joinToString("、"), enabled = idle) { editCidrs = true }
-                SwitchRow("局域网访问需要密码", current.requirePassword,
-                    "关闭后同一网段内的任何设备都能直接管理，只建议在可信的家庭网络里关闭", enabled = idle) {
-                    state.set("require_password", JsonPrimitive(it))
-                }
+                    value = if (current.allowCidrs.isEmpty()) "所有私网地址" else current.allowCidrs.joinToString("、"), enabled = quiet) { editCidrs = true }
             }
         }
         if (current.lan && current.enabled) {
@@ -308,7 +381,11 @@ fun WebUiPage(onBack: () -> Unit, onNavigate: (String) -> Unit) {
             }
         }
         item(key = "note") {
-            Caption("网页管理的权限与本应用相同（root），只在可信网络中开启，并设置足够长的密码。本机浏览器访问也始终需要密码。")
+            if (current.enabled && !(current.requirePassword && current.hasPassword)) {
+                Caption("当前免密：本机任何应用${if (current.lan) "和同一网络里的任何设备" else ""}都能以 root 权限管理本模块。只在可信环境下这样用，建议设置密码。", Tone.warning)
+            } else {
+                Caption("网页管理的权限与本应用相同（root），只在可信网络中开启，并设置足够长的密码。")
+            }
         }
     }
     EditDialog(show = editPort, title = "端口", initial = current.port.toString(), summary = "1024–65535",
@@ -359,8 +436,8 @@ fun WebUiPage(onBack: () -> Unit, onNavigate: (String) -> Unit) {
         state.setEnabled(false)
     }
     ConfirmDialog(show = clearPassword, title = "清除密码",
-        summary = if (current.enabled && (current.requirePassword || !current.lan) && !(current.tailscale && current.tailscaleNoPassword))
-            "清除后将无法登录网页管理，直到重新设置密码。" else "清除后只能通过免密方式访问。",
+        summary = "清除后本机应用${if (current.lan) "和局域网设备" else ""}无需密码即可管理；" +
+            if (current.tailscale && !current.tailscaleNoPassword) "Tailnet 设备将无法登录，直到重新设置密码。" else "建议只在可信环境下这样用。",
         confirm = "清除", danger = true, onDismiss = { clearPassword = false }) {
         clearPassword = false
         state.setPassword("")

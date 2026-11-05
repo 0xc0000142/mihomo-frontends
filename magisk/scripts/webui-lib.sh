@@ -27,9 +27,9 @@ webd_stop() {
     kill "$webd_pid" 2>/dev/null
     wait_count=0
     while webd_matches "$webd_pid" "$webd_ticks"; do
-      [ "$wait_count" -ge 5 ] && { kill -9 "$webd_pid" 2>/dev/null; sleep 1; break; }
+      [ "$wait_count" -ge 25 ] && { kill -9 "$webd_pid" 2>/dev/null; sleep 1; break; }
       wait_count=$((wait_count + 1))
-      sleep 1
+      sleep 0.2 2>/dev/null || sleep 1
     done
   fi
   rm -f "$WEBD_PID"
@@ -47,9 +47,10 @@ webd_start() {
     trap '' HUP
     tool setsid sh "$SCRIPTS/webd-launch.sh" </dev/null >>"$WEBD_LOG" 2>&1
   ) </dev/null >/dev/null 2>&1 &
+  # 每 0.2 秒检查一次，最多 10 秒（不支持小数的 sleep 退化为 1 秒）
   wait_count=0
-  while [ "$wait_count" -lt 10 ]; do
-    sleep 1
+  while [ "$wait_count" -lt 50 ]; do
+    sleep 0.2 2>/dev/null || sleep 1
     webd_alive && return 0
     wait_count=$((wait_count + 1))
   done

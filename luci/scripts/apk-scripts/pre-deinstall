@@ -1,6 +1,8 @@
 #!/bin/sh
-# 卸载前：停止并禁用服务（/etc/mihomo 与内核不删除）
-[ -x /etc/init.d/mihomo ] || exit 0
-/etc/init.d/mihomo stop 2>/dev/null
-/etc/init.d/mihomo disable 2>/dev/null
+# 卸载前：停止并禁用服务（/etc/mihomo 与内核不删除；Sub-Store 的数据在 /etc/mihomo/substore，同样保留）
+for s in mihomo-substore mihomo; do
+	[ -x /etc/init.d/$s ] || continue
+	/etc/init.d/$s stop 2>/dev/null
+	/etc/init.d/$s disable 2>/dev/null
+done
 exit 0

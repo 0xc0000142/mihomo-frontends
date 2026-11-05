@@ -47,4 +47,11 @@ assert.deepStrictEqual(st.policyData([ { key: ' +.lan ', servers: '223.5.5.5, 11
 	[ { key: '+.lan', servers: [ '223.5.5.5', '119.29.29.29' ] } ], '去掉空行，服务器按空格或逗号分隔');
 assert.deepStrictEqual(st.policyData(st.policyRows([ { key: 'a', servers: [ 'x' ] } ])), [ { key: 'a', servers: [ 'x' ] } ]);
 
+// serve 表格：去掉空行与结尾 /，严格模式下拒绝重复端口与非法目标
+assert.deepStrictEqual(st.serveData([ { port: '8080', target: 'http://127.0.0.1:80/' }, { port: '', target: '' }, { port: 9000, target: 'unix:/tmp/a.sock' } ], true),
+	[ { port: 8080, target: 'http://127.0.0.1:80' }, { port: 9000, target: 'unix:/tmp/a.sock' } ]);
+assert.throws(() => st.serveData([ { port: 1, target: 'unix:a' }, { port: '1', target: 'unix:b' } ], true), /端口重复/);
+assert.throws(() => st.serveData([ { port: 81, target: 'http://router.lan:80' } ], true), /目标/);
+assert.throws(() => st.serveData([ { port: 0, target: 'unix:a' } ], true), /端口/);
+
 // 网卡下拉的说明

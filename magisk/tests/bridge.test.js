@@ -1278,9 +1278,9 @@ test('tailscaleStatus decodes only the login profile and resolves state-dir insi
   const response = await bridge.request('tailscaleStatus');
   assert.equal(response.ok, true, response.error);
   assert.deepEqual(JSON.parse(JSON.stringify(response.list)), [
-    { name: 'TS-A', stateDir: '/data/adb/mihomo/tailscale', authKey: true, loggedIn: true, login: 'user@example.com', tailnet: 'example.ts.net', magicDns: 'tail0000.ts.net' },
-    { name: 'TS B', stateDir: '/data/adb/mihomo/ts-b', authKey: false, loggedIn: false, login: null, tailnet: null, magicDns: null },
-    { name: 'Bad', stateDir: null, authKey: false, loggedIn: false, login: null, tailnet: null, magicDns: null },
+    { name: 'TS-A', stateDir: '/data/adb/mihomo/tailscale', authKey: true, kernel: false, loggedIn: true, login: 'user@example.com', tailnet: 'example.ts.net', magicDns: 'tail0000.ts.net' },
+    { name: 'TS B', stateDir: '/data/adb/mihomo/ts-b', authKey: false, kernel: false, loggedIn: false, login: null, tailnet: null, magicDns: null },
+    { name: 'Bad', stateDir: null, authKey: false, kernel: false, loggedIn: false, login: null, tailnet: null, magicDns: null },
   ]);
   assert.ok(!bridge.commands.some((command) => command.includes('/etc/ts')), 'state-dir outside the data directory is never read');
 });
@@ -1303,6 +1303,45 @@ test('tailscaleLogout refuses state directories outside the data directory', asy
   assert.match(bad.error, /数据目录/);
   assert.equal((await bridge.request('tailscaleLogout', { name: 'TS-A' })).ok, true);
   assert.ok(bridge.commands.includes(scriptRoot + "tailscale.sh logout '/data/adb/mihomo/tailscale'"));
+});
+
+test('tailscale operations use the kernel /tailscale API when the core provides it', async () => {
+  const running = { ok: true, running: true, pid: 1, rss_kb: 1, uptime: 5, desired: 'manual', allowed: true, current_ssid: '' };
+  const kernel = { tailscale: [
+    { name: 'TS-A', state: 'Running', login: 'user@example.com', tailnet: 'example.ts.net', magicDNSSuffix: 'tail0000.ts.net',
+      self: { hostName: 'a', dnsName: 'a.tail0000.ts.net.', ips: ['100.64.0.2'], online: true }, serve: [{ port: 80, target: 'unix:run/webui.sock' }] },
+    { name: 'TS B', state: 'NeedsLogin', authURL: 'https://login.tailscale.com/a/xyz' },
+  ] };
+  const calls = [];
+  const bridge = tailscaleBridge((command) => {
+    if (command === scriptRoot + 'mihomo.sh status') return jsonResult(running);
+    if (command.includes('tailscale.sh state')) return jsonResult({ ok: true, exists: false });
+    if (command.includes('host.sh api')) {
+      calls.push(command);
+      if (command.includes("'GET' 'http://127.0.0.1:9090/tailscale'")) return result(JSON.stringify(kernel) + '\n__MIHOMO_HTTP__:200');
+      if (command.includes('/tailscale/TS%20B/login?wait=15')) return result(JSON.stringify(kernel.tailscale[1]) + '\n__MIHOMO_HTTP__:200');
+      if (command.includes('/tailscale/TS-A/logout')) return result('\n__MIHOMO_HTTP__:204');
+    }
+    return undefined;
+  });
+  const status = await bridge.request('tailscaleStatus');
+  assert.equal(status.ok, true, status.error);
+  assert.equal(status.kernel, true);
+  const [a, b] = status.list;
+  assert.equal(a.loggedIn, true);
+  assert.equal(a.login, 'user@example.com');
+  assert.equal(a.dnsName, 'a.tail0000.ts.net');
+  assert.deepEqual(JSON.parse(JSON.stringify(a.ips)), ['100.64.0.2']);
+  assert.equal(b.loggedIn, false);
+  assert.equal(b.authUrl, 'https://login.tailscale.com/a/xyz');
+  const login = await bridge.request('tailscaleLogin', { name: 'TS B', wait: 15 });
+  assert.equal(login.ok, true, login.error);
+  assert.equal(login.url, 'https://login.tailscale.com/a/xyz');
+  assert.ok(calls.some((command) => command.includes("MIHOMO_API_TIMEOUT='25'") && command.includes("'POST'")), 'login waits longer than the default timeout');
+  assert.ok(!bridge.commands.some((command) => command.includes('tailscale.sh login')), 'no log scraping with a new core');
+  const logout = await bridge.request('tailscaleLogout', { name: 'TS-A' });
+  assert.equal(logout.ok, true, logout.error);
+  assert.ok(!bridge.commands.some((command) => command.includes('tailscale.sh logout')), 'logout keeps the state directory with a new core');
 });
 
 test('openUrl only accepts http(s) and qrCode returns a square module matrix', async () => {
@@ -1379,6 +1418,40 @@ test('dashboard builds a zashboard setup link for the manager and for remote acc
   assert.equal(proxied.url, 'http://192.168.1.5:9099/clash/ui/#/setup?disableUpgradeCore=1&hostname=192.168.1.5&port=9099&secondaryPath=%2Fclash&http=1');
   const none = makeBridge({ handler: (command) => command === scriptRoot + 'host.sh controller' ? result('external-controller: 127.0.0.1:9090') : undefined });
   assert.equal((await none.request('dashboard')).available, false);
+});
+
+test('diagnostics redacts links, secrets, UUIDs and public addresses', async () => {
+  const raw = [
+    'proxy-providers: url=https://sub.example.com/api?token=abcdef',
+    'secret: "hunter2"', 'auth-key: tskey-auth-kAbCdEf123-XYZ', 'uuid 1b4e28ba-2fa1-11d2-883f-0016d3cca427',
+    'dial 203.0.113.9:443 via 192.168.1.2 and 100.64.0.7', 'v6 2408:8207:1234:5678::1',
+    'blob QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZnaGlqa2xtbm9w',
+  ].join('\n');
+  const bridge = makeBridge({ handler: (command) => command === scriptRoot + 'host.sh diag' ? result(raw) : undefined });
+  const { content } = await bridge.request('diagnostics');
+  assert.match(content, /^# mihomo-ebpf 诊断信息/);
+  assert.match(content, /服务: 未运行/);
+  for (const leaked of ['sub.example.com', 'hunter2', 'kAbCdEf123', '1b4e28ba', '203.0.113.9', '5678::1', 'QUJDREVG']) {
+    assert.ok(!content.includes(leaked), leaked + ' leaked:\n' + content);
+  }
+  for (const kept of ['https://***', 'secret: ***', '203.0.x.x', '192.168.1.2', '100.64.0.7', '2408:8207:…']) {
+    assert.ok(content.includes(kept), kept + ' missing:\n' + content);
+  }
+});
+
+test('dashboardUpgrade asks the core to download the panel again', async () => {
+  const bridge = makeBridge({
+    status: { running: true, desired: 'manual' },
+    handler: (command) => {
+      if (command === scriptRoot + 'host.sh controller') return result('external-controller: 127.0.0.1:9090\nexternal-ui: ./ui');
+      if (isCurl(command)) return result('{"status":"ok"}\n__MIHOMO_HTTP__:200');
+      return undefined;
+    },
+  });
+  assert.deepEqual(await bridge.request('dashboardUpgrade'), { ok: true });
+  assert.ok(bridge.commands.some((command) => isCurl(command) && command.includes("'POST'") && command.includes('/upgrade/ui')), bridge.commands.join('\n'));
+  const stopped = makeBridge({ handler: (command) => command === scriptRoot + 'host.sh controller' ? result('external-controller: 127.0.0.1:9090\nexternal-ui: ./ui') : undefined });
+  assert.match((await stopped.request('dashboardUpgrade')).error, /没有运行/);
 });
 
 test('webui settings and password are validated and passed as Base64', async () => {

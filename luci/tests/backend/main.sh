@@ -8,7 +8,9 @@ H=${MLT_HOME:-/root/mlt-home}
 # UCI 用独立目录，发布地址指向本地目录：测试不会改动 /etc/config，也不访问网络
 export MIHOMO_LUCI_HOME=$H MIHOMO_LUCI_RUN=$T/run MIHOMO_LUCI_INIT=$B/fake-init.sh \
 	MIHOMO_LUCI_SERVICE=mihomo-luci-test MIHOMO_LUCI_START_TIMEOUT=8 \
-	MIHOMO_LUCI_UCI_DIR=$T/uci MIHOMO_LUCI_RELEASE_BASE=file://$T/release/
+	MIHOMO_LUCI_UCI_DIR=$T/uci MIHOMO_LUCI_RELEASE_BASE=file://$T/release/ \
+	MIHOMO_LUCI_SUBSTORE_DIR=$H/substore MIHOMO_LUCI_NODE=$T/no-node MIHOMO_LUCI_SUBSTORE_INIT=$T/no-substore-init \
+	MIHOMO_LUCI_SUBSTORE_INSTALLER=$T/no-substore-install
 chmod 755 $B/fake-init.sh $B/fake-mihomo.sh
 tests="$*"
 [ -n "$tests" ] || tests=$(cd $B && ls test_*.uc)

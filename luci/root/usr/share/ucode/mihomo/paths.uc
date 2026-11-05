@@ -32,6 +32,12 @@ const CORE_LATEST = RUN_DIR + '/core-latest.json';
 const CURL = env('MIHOMO_LUCI_CURL', '/usr/bin/curl');
 // 非空时代替 https://github.com/<repo>/releases/download/<tag>/（测试用本地目录）
 const RELEASE_BASE = env('MIHOMO_LUCI_RELEASE_BASE', '');
+// Sub-Store：程序与数据目录、procd 服务、后台安装脚本
+const SUBSTORE_DIR = env('MIHOMO_LUCI_SUBSTORE_DIR', '/etc/mihomo/substore');
+const SUBSTORE_INIT = env('MIHOMO_LUCI_SUBSTORE_INIT', '/etc/init.d/mihomo-substore');
+const SUBSTORE_INSTALLER = env('MIHOMO_LUCI_SUBSTORE_INSTALLER', '/usr/libexec/mihomo-luci/substore-install');
+const NODE = env('MIHOMO_LUCI_NODE', '/usr/bin/node');
 
 export { HOME, CONFIG, CANDIDATE, BACKUP_DIR, STATE_DIR, DISABLED, BIN, INIT, SERVICE, RUN_DIR, LOCK, JOB_DIR, YQ, JOB_BIN,
-	START_TIMEOUT, BACKUP_KEEP, LOG_TAG, LEASES, BIN_PREV, TEMPLATE, UCI_DIR, UCI_CONF, CORE_LATEST, CURL, RELEASE_BASE };
+	START_TIMEOUT, BACKUP_KEEP, LOG_TAG, LEASES, BIN_PREV, TEMPLATE, UCI_DIR, UCI_CONF, CORE_LATEST, CURL, RELEASE_BASE,
+	SUBSTORE_DIR, SUBSTORE_INIT, SUBSTORE_INSTALLER, NODE };

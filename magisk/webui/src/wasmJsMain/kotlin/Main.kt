@@ -158,7 +158,7 @@ fun AppIcon(packageName: String, label: String, modifier: Modifier = Modifier, l
 private val tabs = listOf("home" to "首页", "proxies" to "代理", "settings" to "设置")
 
 /** 子页面（压栈显示，带返回）。 */
-private val subPages = setOf("connections", "profile", "core", "config", "backups", "logs", "setup", "tailscale", "webui", "network")
+private val subPages = setOf("connections", "profile", "core", "config", "backups", "logs", "setup", "tailscale", "webui", "network", "substore")
 
 private class Navigator {
     var tab by mutableStateOf("home")
@@ -205,7 +205,8 @@ private fun MihomoApp() {
     LaunchedEffect(Unit) { BackDispatcher.install() }
     BackSync()
     // 子页面或非首页标签时，返回键先回上一级；在首页且无弹窗时交给 WebUI 关闭。
-    BackHandler(enabled = phase == "app" && (navigator.stack.isNotEmpty() || navigator.tab != "home")) { navigator.back() }
+    val levels = navigator.stack.size + if (navigator.tab != "home") 1 else 0
+    BackHandler(enabled = phase == "app" && levels > 0, levels = levels) { navigator.back() }
     Box(Modifier.fillMaxSize().background(MiuixTheme.colorScheme.surface)) {
         when (phase) {
             "checking" -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -242,6 +243,7 @@ private fun AppShell(navigator: Navigator) {
                     "backups" -> BackupsPage(onBack = back)
                     "logs" -> LogsPage(onBack = back)
                     "tailscale" -> TailscalePage(onBack = back)
+                    "substore" -> SubStorePage(onBack = back)
                     "webui" -> WebUiPage(onBack = back, onNavigate = navigator::go)
                     "network" -> NetworkPage(onBack = back, onNavigate = navigator::go)
                     "setup" -> SetupWizard(firstRun = false) { navigator.back(); LiveOverview.invalidate(); ProfileState.invalidate() }
@@ -276,27 +278,30 @@ fun main() {
             }
         }
         family?.let { loaded ->
-            val styles = remember(loaded) {
+            val dark = isSystemInDarkTheme()
+            val colors = remember(dark) { if (dark) darkColorScheme() else lightColorScheme() }
+            // 文字颜色要跟随主题：输入框直接使用 textStyles 的颜色，不给颜色时深色模式下是黑字
+            val styles = remember(loaded, colors) {
                 val defaults = defaultTextStyles()
+                val ink = colors.onBackground
                 defaults.copy(
-                    main = defaults.main.copy(fontFamily = loaded),
-                    paragraph = defaults.paragraph.copy(fontFamily = loaded),
-                    body1 = defaults.body1.copy(fontFamily = loaded),
-                    body2 = defaults.body2.copy(fontFamily = loaded),
-                    button = defaults.button.copy(fontFamily = loaded),
-                    footnote1 = defaults.footnote1.copy(fontFamily = loaded),
-                    footnote2 = defaults.footnote2.copy(fontFamily = loaded),
-                    headline1 = defaults.headline1.copy(fontFamily = loaded),
-                    headline2 = defaults.headline2.copy(fontFamily = loaded),
-                    subtitle = defaults.subtitle.copy(fontFamily = loaded),
-                    title1 = defaults.title1.copy(fontFamily = loaded),
-                    title2 = defaults.title2.copy(fontFamily = loaded),
-                    title3 = defaults.title3.copy(fontFamily = loaded),
-                    title4 = defaults.title4.copy(fontFamily = loaded),
+                    main = defaults.main.copy(fontFamily = loaded, color = ink),
+                    paragraph = defaults.paragraph.copy(fontFamily = loaded, color = ink),
+                    body1 = defaults.body1.copy(fontFamily = loaded, color = ink),
+                    body2 = defaults.body2.copy(fontFamily = loaded, color = ink),
+                    button = defaults.button.copy(fontFamily = loaded, color = ink),
+                    footnote1 = defaults.footnote1.copy(fontFamily = loaded, color = ink),
+                    footnote2 = defaults.footnote2.copy(fontFamily = loaded, color = ink),
+                    headline1 = defaults.headline1.copy(fontFamily = loaded, color = ink),
+                    headline2 = defaults.headline2.copy(fontFamily = loaded, color = ink),
+                    subtitle = defaults.subtitle.copy(fontFamily = loaded, color = ink),
+                    title1 = defaults.title1.copy(fontFamily = loaded, color = ink),
+                    title2 = defaults.title2.copy(fontFamily = loaded, color = ink),
+                    title3 = defaults.title3.copy(fontFamily = loaded, color = ink),
+                    title4 = defaults.title4.copy(fontFamily = loaded, color = ink),
                 )
             }
-            val dark = isSystemInDarkTheme()
-            MiuixTheme(colors = if (dark) darkColorScheme() else lightColorScheme(), textStyles = styles) {
+            MiuixTheme(colors = colors, textStyles = styles) {
                 CompositionLocalProvider {
                     MihomoApp()
                 }

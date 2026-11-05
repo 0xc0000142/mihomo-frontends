@@ -19,17 +19,40 @@
 
   // ---------- 基础工具 ----------
 
+  // YAML 错误的行列（从 1 开始）：优先用 linePos，没有时按字符偏移计算
+  function position(text, error) {
+    if (error.linePos && error.linePos[0]) return error.linePos[0];
+    const offset = Array.isArray(error.pos) && Number.isInteger(error.pos[0]) ? Math.min(error.pos[0], text.length) : -1;
+    if (offset < 0) return { line: 0, col: 0 };
+    const before = text.slice(0, offset);
+    return { line: before.split('\n').length, col: offset - before.lastIndexOf('\n') };
+  }
+
   function parse(content) {
     const text = String(content == null ? '' : content).replace(/\r\n?/g, '\n');
     if (!text.trim()) throw new Error('配置为空');
     const doc = Y.parseDocument(text, PARSE);
     if (doc.errors.length) {
       const error = doc.errors[0];
-      const line = error.linePos && error.linePos[0] ? '第 ' + error.linePos[0].line + ' 行：' : '';
+      const where = position(text, error);
+      const line = where.line ? '第 ' + where.line + ' 行：' : '';
       throw new Error('YAML 解析失败，' + line + String(error.message).split('\n')[0]);
     }
     if (!Y.isMap(doc.contents)) throw new Error('配置顶层必须是 YAML 映射');
     return doc;
+  }
+
+  // 编辑器实时校验：列出 YAML 错误与警告（行、列从 1 开始），不抛异常
+  function lint(content) {
+    const text = String(content == null ? '' : content).replace(/\r\n?/g, '\n');
+    const doc = Y.parseDocument(text, PARSE);
+    const describe = (item, level) => {
+      const where = position(text, item);
+      return { level, message: String(item.message).split('\n')[0].replace(/ at line \d+, column \d+:?$/, ''), line: where.line, col: where.col };
+    };
+    const problems = doc.errors.map((item) => describe(item, 'error')).concat(doc.warnings.map((item) => describe(item, 'warning')));
+    if (!doc.errors.length && text.trim() && !Y.isMap(doc.contents)) problems.push({ level: 'error', message: '配置顶层必须是 YAML 映射', line: 1, col: 1 });
+    return { ok: true, problems: problems.slice(0, 20) };
   }
 
   function dump(doc) {
@@ -260,6 +283,33 @@
   function webuiServe(item) {
     return Array.isArray(item.serve) && item.serve.some((entry) => isObject(entry) && entry.target === WEBUI_SERVE_TARGET);
   }
+
+  // 用户自己的 serve 转发（不含网页管理那一条）：Tailnet 里访问 http://设备名:port/ 转到 target
+  function userServe(item) {
+    return (Array.isArray(item.serve) ? item.serve : [])
+      .filter((entry) => isObject(entry) && entry.target !== WEBUI_SERVE_TARGET)
+      .map((entry) => ({ port: Number(entry.port) || 0, target: typeof entry.target === 'string' ? entry.target : '' }));
+  }
+
+  const SERVE_HTTP = /^http:\/\/(\d{1,3}(\.\d{1,3}){3}|\[[0-9A-Fa-f:.]+\]):(\d{1,5})\/?$/;
+  const SERVE_UNIX = /^unix:(\/\/)?[^\s]+$/;
+
+  function normalizeServe(list, webui) {
+    if (!Array.isArray(list) || list.length > 32) throw new Error('serve 必须是最多 32 项的列表');
+    const seen = new Set(webui ? [WEBUI_SERVE_PORT] : []);
+    return list.map((entry) => {
+      if (!isObject(entry)) throw new Error('serve 项无效');
+      const port = entry.port;
+      if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('端口必须是 1–65535 的整数');
+      if (seen.has(port)) throw new Error(port === WEBUI_SERVE_PORT && webui ? '80 端口已用于网页管理' : '端口重复：' + port);
+      seen.add(port);
+      const target = typeof entry.target === 'string' ? entry.target.trim() : '';
+      const http = SERVE_HTTP.exec(target);
+      if (http && Number(http[3]) >= 1 && Number(http[3]) <= 65535) return { port, target: target.replace(/\/$/, '') };
+      if (SERVE_UNIX.test(target)) return { port, target };
+      throw new Error('转发目标须为 http://IP:端口 或 unix:路径：' + (target || '(空)'));
+    });
+  }
   const TAILSCALE_NAME = /^[A-Za-z0-9_.-]{1,64}$/;
 
   function tailscaleList(data) {
@@ -329,7 +379,7 @@
     }));
     const tailscale = tailscaleList(data).map((item) => ({
       name: String(item.name || ''), type: 'tailscale', editable: true, stateDir: typeof item['state-dir'] === 'string' ? item['state-dir'] : '',
-      used: !!item['auth-key'], webui: webuiServe(item),
+      used: !!item['auth-key'], webui: webuiServe(item), serve: userServe(item),
       fields: TAILSCALE_FIELDS.map((field) => ({ ...fieldState(field, item, null, extra), id: field.key.join('.'), path: field.key })),
     }));
     return { ok: true, sections, providers, ruleProviders, tailscale, providerFields: PROVIDER_FIELDS.map((field) => fieldState(field, {}, null, extra)),
@@ -396,7 +446,7 @@
       const data = plain(doc);
       if (op.op === 'set') applySet(doc, data, op);
       else if (/^(provider|ruleProvider)\.(set|add|delete)$/.test(op.op)) applyCollection(doc, data, op);
-      else if (/^tailscale\.(set|add|delete|webui)$/.test(op.op)) applyTailscale(doc, data, op);
+      else if (/^tailscale\.(set|add|delete|webui|serve)$/.test(op.op)) applyTailscale(doc, data, op);
       else throw new Error('不支持的修改：' + op.op);
     }
     const output = dump(doc);
@@ -597,6 +647,14 @@
       return;
     }
     const index = plain(doc).proxies.findIndex((item) => isObject(item) && item.type === 'tailscale' && item.name === name);
+    if (action === 'serve') {
+      // 替换用户的 serve 转发，保留网页管理那一条
+      const current = plain(doc).proxies[index];
+      const webui = (Array.isArray(current.serve) ? current.serve : []).filter((entry) => isObject(entry) && entry.target === WEBUI_SERVE_TARGET);
+      const list = webui.concat(normalizeServe(op.serve, webui.length > 0));
+      if (list.length) setIn(doc, ['proxies', index, 'serve'], list); else deleteIn(doc, ['proxies', index, 'serve']);
+      return;
+    }
     if (action === 'webui') {
       // 只有一个出站发布网页管理：开启时先从其它出站上撤掉
       if (typeof op.enable !== 'boolean') throw new Error('enable 必须为布尔值');
@@ -976,5 +1034,5 @@
   }
 
   // 订阅转配置时，把多个订阅写进内置模板之后统一走 optimize。
-  root.mihomoConfig = Object.freeze({ parse: (content) => { parse(content); return { ok: true }; }, schema, patch, analyze, optimize, check });
+  root.mihomoConfig = Object.freeze({ parse: (content) => { parse(content); return { ok: true }; }, lint, schema, patch, analyze, optimize, check });
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -77,6 +77,7 @@ stop_core() {
     done
   fi
   rm -f "$PID_FILE" "$CONTROL_SOCKET"
+  module_status stopped
 }
 
 start_core() {
@@ -98,7 +99,7 @@ start_core() {
     if pid_alive; then
       ready=$(tool curl -fsS --max-time 2 --unix-socket "$CONTROL_SOCKET" http://localhost/ebpf 2>/dev/null)
       if printf '%s' "$ready" | grep -Eq '"inbounds"[[:space:]]*:[[:space:]]*\[[[:space:]]*\{'; then
-        pid_alive && return 0
+        pid_alive && { module_status running; return 0; }
       fi
     elif [ "$start_wait" -ge 2 ] && { [ -f "$PID_FILE" ] || [ -f "$RUN_DIR/launch-error" ]; }; then
       break
@@ -125,7 +126,12 @@ reconcile_policy() {
     auto) ;;
     *) stop_core; return $? ;;
   esac
-  if policy_allowed; then start_core; else stop_core; fi
+  if policy_allowed; then
+    start_core
+  else
+    stop_core || return 1
+    module_status paused
+  fi
 }
 
 backup_config() {

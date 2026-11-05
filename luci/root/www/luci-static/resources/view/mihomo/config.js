@@ -30,10 +30,73 @@ function indent(text, start, end, outdent) {
 	};
 }
 
-// mihomo 的 YAML 错误形如 "yaml: line 383: did not find expected node content"
+// mihomo 的 YAML 错误形如 "yaml: line 383: did not find expected node content"；新版 yq 为 "at L1.C1-L4.C2: …"
 function errorLine(msg) {
-	const m = /\bline (\d+)\b/.exec(msg || '');
+	msg = msg || '';
+	const m = /\bline (\d+)\b/.exec(msg) || /\bL\d+\.C\d+-L(\d+)\.C\d+/.exec(msg) || /\bL(\d+)\.C\d+/.exec(msg);
 	return m ? +m[1] : null;
+}
+
+// 语法高亮：逐行切分为键、字符串、标量、注释与锚点，输出 HTML（覆盖在透明文字的 textarea 下面）
+const HL_LIMIT = 400 * 1024;
+const SCALAR = /^(true|false|yes|no|on|off|null|~|-?\d+(\.\d+)?|0x[0-9a-fA-F]+)$/i;
+
+function esc(s) {
+	return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function span(cls, s) {
+	return s ? '<span class="mh-hl-' + cls + '">' + esc(s) + '</span>' : '';
+}
+
+// 注释从第一个不在引号里、前面是空白的 # 开始
+function splitComment(s) {
+	let q = null;
+	for (let i = 0; i < s.length; i++) {
+		const c = s[i];
+		if (q) { if (c === q) q = null; }
+		else if (c === '"' || c === "'") q = c;
+		else if (c === '#' && (i === 0 || /\s/.test(s[i - 1]))) return [ s.slice(0, i), s.slice(i) ];
+	}
+	return [ s, '' ];
+}
+
+function value(v) {
+	const m = /^(\s*)(.*?)(\s*)$/.exec(v);
+	const body = m[2];
+	let html;
+	if (!body) html = '';
+	else if (/^(["']).*\1$/.test(body)) html = span('str', body);
+	else if (/^[&*!]\S*/.test(body)) {
+		const t = /^([&*!]\S*)(.*)$/.exec(body);
+		html = span('mark', t[1]) + value(t[2]);
+		return esc(m[1]) + html + esc(m[3]);
+	} else if (SCALAR.test(body)) html = span('num', body);
+	else if (/^[|>][-+]?\d*$/.test(body) || /^[\[\]{},]+$/.test(body)) html = span('mark', body);
+	else html = esc(body);
+	return esc(m[1]) + html + esc(m[3]);
+}
+
+function highlightLine(line) {
+	const [ code, comment ] = splitComment(line);
+	let out = '';
+	let rest = code;
+	const lead = /^(\s*)((?:-\s+)*)/.exec(rest);
+	out += esc(lead[1]) + span('mark', lead[2]);
+	rest = rest.slice(lead[0].length);
+	const key = /^("[^"]*"|'[^']*'|[^\s#'"\[\]{},:][^:#]*?)(\s*:)(?=\s|$)/.exec(rest);
+	if (key) {
+		out += span('key', key[1]) + span('mark', key[2]);
+		rest = rest.slice(key[0].length);
+	}
+	return out + value(rest) + span('cmt', comment);
+}
+
+function highlight(text, errLine) {
+	return text.split('\n').map((l, i) => {
+		const html = highlightLine(l);
+		return i + 1 === errLine ? '<span class="mh-hl-err">' + (html || ' ') + '</span>' : html;
+	}).join('\n') + '\n ';
 }
 
 // 第 n 行（从 1 开始）在文本中的字符范围，超出时取最后一行
@@ -49,7 +112,7 @@ function lineRange(text, n) {
 }
 
 return view.extend({
-	lineNumbers, indent, errorLine, lineRange,
+	lineNumbers, indent, errorLine, lineRange, highlight, highlightLine,
 
 	handleSave: null,
 	handleSaveApply: null,
@@ -72,6 +135,10 @@ return view.extend({
 
 		const ta = E('textarea', { 'class': 'mh-code', spellcheck: 'false', autocapitalize: 'off', autocomplete: 'off', wrap: 'off' });
 		const gutter = E('pre', { 'class': 'mh-gutter', 'aria-hidden': 'true' });
+		const hl = E('pre', { 'class': 'mh-hl', 'aria-hidden': 'true' });
+		const wrap = E('div', { 'class': 'mh-code-wrap' }, [ hl, ta ]);
+		this.lint = E('div', { 'class': 'mh-lint' });
+		this.errLine = null;
 		ta.value = cfg.content;
 		this.ta = ta;
 		this.badge = E('span', { 'class': 'mh-badge' }, '未保存的修改');
@@ -79,14 +146,32 @@ return view.extend({
 		this.result = E('div', { 'class': 'mh-result' });
 
 		const undoBtn = mui.btn('撤销全部修改', () => { ta.value = this.saved; sync(); this.result.replaceChildren(); });
+		// 高亮在下一帧重画，连续输入只画一次；超过上限时退回普通文本框
+		let frame = 0, lintTimer = null;
+		const paint = () => {
+			frame = 0;
+			const on = ta.value.length <= HL_LIMIT;
+			wrap.classList.toggle('mh-hl-on', on);
+			hl.innerHTML = on ? highlight(ta.value, this.errLine) : '';
+			hl.scrollTop = ta.scrollTop;
+			hl.scrollLeft = ta.scrollLeft;
+		};
+		this.repaint = () => { if (!frame) frame = requestAnimationFrame(paint); };
 		const sync = () => {
 			gutter.textContent = lineNumbers(ta.value);
 			gutter.scrollTop = ta.scrollTop;
 			this.badge.hidden = ta.value === this.saved;
 			undoBtn.disabled = ta.value === this.saved;
+			this.repaint();
+			clearTimeout(lintTimer);
+			lintTimer = setTimeout(() => this.checkSyntax(), 800);
 		};
 		ta.addEventListener('input', sync);
-		ta.addEventListener('scroll', () => { gutter.scrollTop = ta.scrollTop; });
+		ta.addEventListener('scroll', () => {
+			gutter.scrollTop = ta.scrollTop;
+			hl.scrollTop = ta.scrollTop;
+			hl.scrollLeft = ta.scrollLeft;
+		});
 		ta.addEventListener('keydown', ev => {
 			if (ev.key === 'Tab') {
 				ev.preventDefault();
@@ -113,7 +198,8 @@ return view.extend({
 				mui.btn('校验', () => this.validate()),
 				mui.btn('保存并应用', () => this.save(), 'cbi-button-apply')
 			]),
-			E('div', { 'class': 'mh-editor' }, [ gutter, ta ]),
+			E('div', { 'class': 'mh-editor' }, [ gutter, wrap ]),
+			this.lint,
 			this.result
 		], { tools: [ this.badge, E('span', { 'class': 'mh-sub' }, 'Tab 缩进 · Ctrl+S 保存') ] });
 
@@ -135,6 +221,28 @@ return view.extend({
 			]),
 			detail ? E('details', {}, [ E('summary', {}, '完整输出'), E('pre', { 'class': 'mh-pre' }, detail) ]) : ''
 		);
+	},
+
+	// 输入停顿后只查 YAML 语法（yq，很快）；完整校验（mihomo -t）仍由「校验」按钮触发
+	checkSyntax() {
+		const text = this.ta.value;
+		if (this.linted === text) return;
+		this.linted = text;
+		return api.rpc.yamlCheck(text).then(r => {
+			if (this.ta.value !== text) return;
+			if (!r || !r.ok) {
+				this.lint.replaceChildren(r && r.error ? E('span', { 'class': 'mh-sub' }, r.error) : '');
+				this.errLine = null;
+			} else if (r.valid) {
+				this.errLine = null;
+				this.lint.replaceChildren(E('span', { 'class': 'mh-ok' }, '✓ YAML 语法正确'), E('span', { 'class': 'mh-sub' }, '　保存前会再用 mihomo 完整校验'));
+			} else {
+				this.errLine = r.line || null;
+				this.lint.replaceChildren(E('span', { 'class': 'mh-err' }, '✕ YAML 语法错误' + (r.line ? '（第 ' + r.line + ' 行）' : '') + '：' + r.error),
+					r.line ? [ ' ', mui.btn('跳到该行', () => this.gotoLine(r.line), 'mh-btn-sm') ] : '');
+			}
+			this.repaint();
+		}, () => { this.linted = null; });
 	},
 
 	gotoLine(n) {

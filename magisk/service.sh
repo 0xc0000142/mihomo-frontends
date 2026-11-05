@@ -11,3 +11,5 @@ ensure_dirs || exit 1
 ) </dev/null >/dev/null 2>&1 &
 # 网页管理（启用时才启动）
 sh "$SCRIPTS/webui.sh" boot </dev/null >>"$RUN_DIR/boot.log" 2>&1 &
+# Sub-Store（本机模式且已下载时才启动）
+sh "$SCRIPTS/substore.sh" boot </dev/null >>"$RUN_DIR/boot.log" 2>&1 &

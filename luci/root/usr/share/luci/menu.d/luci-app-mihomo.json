@@ -29,6 +29,12 @@
 		"action": { "type": "view", "path": "mihomo/providers" },
 		"depends": { "acl": [ "luci-app-mihomo" ] }
 	},
+	"admin/services/mihomo/substore": {
+		"title": "Sub-Store",
+		"order": 45,
+		"action": { "type": "view", "path": "mihomo/substore" },
+		"depends": { "acl": [ "luci-app-mihomo" ] }
+	},
 	"admin/services/mihomo/rules": {
 		"title": "规则",
 		"order": 50,

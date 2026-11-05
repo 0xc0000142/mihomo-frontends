@@ -337,7 +337,9 @@ fun SetupWizard(firstRun: Boolean, onExit: () -> Unit) {
     val state = SetupState
     LaunchedEffect(Unit) { state.start() }
     val titles = listOf("检测本机", "配置来源", "本机优化", "运行偏好", "应用")
-    BackHandler(enabled = state.step in 1..3 || (!firstRun && !state.finished && state.busy.isEmpty())) {
+    val canExit = !firstRun && !state.finished && state.busy.isEmpty()
+    val levels = (if (state.step in 1..3) state.step else 0) + if (canExit) 1 else 0
+    BackHandler(enabled = levels > 0, levels = levels) {
         if (state.step in 1..3) { state.step--; state.error = "" } else onExit()
     }
     Box(Modifier.fillMaxSize()) {

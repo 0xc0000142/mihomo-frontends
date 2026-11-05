@@ -115,4 +115,9 @@ if (getenv('MIHOMO_TEST_LOCAL')) {
 	eq([r, fs.stat(P.HOME + '/ts-a')], [{ ok: true, restarted: false }, null], '退出登录：删除状态目录');
 }
 
+
+// 诊断信息：各区段都在，命令失败时不报错
+let d = SY.diagnostics();
+ok(d.ok && index(d.text, '== 系统 ==') >= 0 && index(d.text, '== 内核 ==') >= 0 && index(d.text, '== 最近日志 ==') >= 0, 'diagnostics 区段齐全');
+
 done();

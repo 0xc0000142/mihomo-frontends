@@ -26,7 +26,7 @@ tar -C / -xf -
 $UCI
 UCI_EOF
 for p in yq curl ca-bundle; do apk info -e \$p >/dev/null 2>&1 || apk add \$p </dev/null; done
-chmod 755 /usr/libexec/mihomo-luci/apply-job /etc/init.d/mihomo
+chmod 755 /usr/libexec/mihomo-luci/apply-job /usr/libexec/mihomo-luci/substore-install /etc/init.d/mihomo /etc/init.d/mihomo-substore
 mkdir -p \$S
 echo $BACKEND > \$S/backend.md5
 echo $FRONTEND > \$S/frontend.md5

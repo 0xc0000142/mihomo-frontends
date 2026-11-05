@@ -7,6 +7,7 @@ import * as S from 'mihomo.service';
 import * as SY from 'mihomo.system';
 import * as CORE from 'mihomo.core';
 import * as SU from 'mihomo.setup';
+import * as SS from 'mihomo.substore';
 
 // 所有方法返回 { ok: true, ... } 或 { ok: false, error, detail }；异常也转换成这种形式
 function wrap(fn) {
@@ -27,6 +28,12 @@ return {
 		backups:        { call: wrap(() => ({ ok: true, list: A.backups() })) },
 		backup_read:    { args: { name: '' }, call: wrap((a) => A.backup_read(a.name)) },
 		logs:           { args: { lines: 0 }, call: wrap((a) => SY.logs(a.lines)) },
+		diagnostics:    { call: wrap(() => SY.diagnostics()) },
+		substore_status: { call: wrap(() => SS.status()) },
+		substore_list:  { call: wrap(() => SS.list()) },
+		substore_set:   { args: { mode: '', port: 0, lan: false, url: '' }, call: wrap((a) => SS.set(a)) },
+		substore_install: { args: { what: '' }, call: wrap((a) => SS.install(a.what || 'all')) },
+		substore_service: { args: { action: '' }, call: wrap((a) => SS.service(a.action)) },
 		devices:        { call: wrap(() => SY.devices()) },
 		sections:       { args: { names: [] }, call: wrap((a) => F.sections(a.names)) },
 		interfaces:     { call: wrap(() => SY.interfaces()) },
@@ -34,6 +41,7 @@ return {
 		tailscale_logout: { args: { name: '' }, call: wrap((a) => SY.tailscale_logout(a.name)) },
 		apply_status:   { args: { job: '' }, call: wrap((a) => A.job_status(a.job)) },
 		validate:       { args: { content: '' }, call: wrap((a) => A.validate_content(a.content)) },
+		yaml_check:     { args: { content: '' }, call: wrap((a) => A.yaml_check(a.content)) },
 		save_raw:       { args: { content: '', rev: '' }, call: wrap((a) => A.begin('raw', a)) },
 		patch:          { args: { ops: [], rev: '' }, call: wrap((a) => A.begin('patch', a)) },
 		provider_toggle: { args: { name: '', enabled: false, rev: '' },

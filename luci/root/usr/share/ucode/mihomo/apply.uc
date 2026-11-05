@@ -58,6 +58,22 @@ function validate_content(content) {
 	return { ok: true, valid: v.ok, error: v.error, detail: v.detail };
 }
 
+function yaml_check(content) {
+	if (type(content) != 'string')
+		return { ok: false, error: '配置内容为空' };
+	if (length(content) > 4 * 1024 * 1024)
+		return { ok: false, error: '配置太大' };
+	U.mkdir_p(P.RUN_DIR);
+	let tmp = P.RUN_DIR + '/lint-' + U.rand_hex(4) + '.yaml';
+	if (!U.write_file(tmp, content))
+		return { ok: false, error: '无法写入临时文件' };
+	let r = Y.syntax(tmp);
+	fs.unlink(tmp);
+	if (r == null)
+		return { ok: false, error: '没有安装 yq，无法检查语法' };
+	return { ok: true, ...r };
+}
+
 /* ---------- 锁 ---------- */
 
 function pid_alive(pid) {
@@ -404,5 +420,5 @@ function run_job(id) {
 	lock_release();
 }
 
-export { ERR_BUSY, ERR_CONFLICT, config_read, validate_file, validate_content, lock_acquire, lock_release,
+export { ERR_BUSY, ERR_CONFLICT, config_read, validate_file, validate_content, yaml_check, lock_acquire, lock_release,
 	backups, backup_create, backup_read, backup_delete, job_status, begin, run_job, restart_and_wait };

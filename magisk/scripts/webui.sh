@@ -27,17 +27,11 @@ status() {
   printf '{"ok":true,"installed":%s,"running":%s,"settings":%s}\n' "$installed" "$running" "$settings"
 }
 
-# 监听相关的设置（端口、是否监听局域网）；其它设置服务会自动重新读取
-listen_key() {
-  [ -x "$WEBD" ] || return 0
-  "$WEBD" get -c "$WEBD_CONF" 2>/dev/null | head -n 1 | grep -o '"lan":[a-z]*\|"port":[0-9]*' | tr -d '\n'
-}
-
-# 设置变化后让服务与 enabled 一致；监听地址与端口只在启动时读取，变了才重启
+# 设置变化后让服务与 enabled 一致；监听地址与端口只在启动时读取，变了才重启（$1 为 true）
 reconcile() {
   if webd_enabled; then
     if webd_alive; then
-      [ "$1" = "$(listen_key)" ] && return 0
+      [ "$1" = true ] || return 0
       # 网页管理发起的请求还没返回，延迟重启（新会话里执行，不受本进程退出影响）
       (
         close_inherited_fds
@@ -55,10 +49,13 @@ case "$1" in
   status) status ;;
   set)
     [ "$#" -eq 2 ] || fail '参数无效'
-    before=$(listen_key)
     out=$(webd_cli set "$2") || { printf '%s\n' "$out"; exit 1; }
-    reconcile "$before"
-    status
+    settings=$(printf '%s\n' "$out" | head -n 1)
+    changed=false
+    case "$settings" in *'"listen_changed":true'*) changed=true ;; esac
+    reconcile "$changed"
+    running=false; webd_alive && running=true
+    printf '{"ok":true,"installed":true,"running":%s,"settings":%s}\n' "$running" "$settings"
     ;;
   passwd)
     [ "$#" -eq 2 ] || fail '参数无效'

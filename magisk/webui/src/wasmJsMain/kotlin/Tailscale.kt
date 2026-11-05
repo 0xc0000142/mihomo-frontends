@@ -2,8 +2,9 @@
 
 package mihomo
 
-// Tailscale：内核内置的 tailscale 出站（tsnet）。不填 auth-key 时用网页登录：
-// 后台订阅控制器日志并对出站发一次测速唤醒 tsnet，从日志里取出登录链接；页面轮询状态文件，登录成功后自动更新。
+// Tailscale：内核内置的 tailscale 出站（tsnet）。新内核提供 /tailscale 控制器接口：
+// 状态（含 IP、登录链接、错误）直接向内核查询，「连接 / 网页登录」让内核立即启动 tsnet 并返回登录链接；
+// 旧内核退回到订阅日志、测速唤醒 tsnet 并从日志里取登录链接的方式。页面轮询状态，登录成功后自动更新。
 // 出站的增删改走配置引擎（tailscale.add / set / delete），保存流程与「内核配置」相同：patch » 校验 » 写入并重启。
 
 import androidx.compose.foundation.Canvas
@@ -46,6 +47,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CardDefaults
@@ -65,7 +67,7 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
         const ok = document.execCommand('copy'); area.remove(); return ok;
     } catch (e) { return false; }
 }""")
-private external fun copyText(text: String): Boolean
+internal external fun copyText(text: String): Boolean
 
 internal data class TailscaleEntry(
     val name: String,
@@ -77,7 +79,18 @@ internal data class TailscaleEntry(
     val magicDns: String,
     val fields: List<ConfigField>,
     val webui: Boolean = false,
+    /** 内核报告的 tsnet 状态：NotStarted / NeedsLogin / Starting / Running / NeedsMachineAuth …；旧内核为空 */
+    val state: String = "",
+    val kernel: Boolean = false,
+    val ips: List<String> = emptyList(),
+    val dnsName: String = "",
+    val problem: String = "",
+    /** 用户的 serve 转发（不含网页管理）：端口 → 目标 */
+    val serve: List<Pair<Int, String>> = emptyList(),
 )
+
+private fun JsonObject.strings(key: String): List<String> =
+    (this[key] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }.orEmpty()
 
 internal object TailscaleState {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -114,7 +127,12 @@ internal object TailscaleState {
             val state = status[name] ?: JsonObject(emptyMap())
             TailscaleEntry(name, state.string("stateDir"), state.boolean("authKey"), state.boolean("loggedIn"),
                 state.string("login"), state.string("tailnet"), state.string("magicDns"), item.objects("fields").map { it.field() },
-                item.boolean("webui"))
+                item.boolean("webui"), state = state.string("state"), kernel = state.boolean("kernel"), ips = state.strings("ips"),
+                dnsName = state.string("dnsName"), problem = state.string("error"),
+                serve = item.objects("serve").mapNotNull { serve ->
+                    val port = (serve["port"] as? JsonPrimitive)?.intOrNull ?: return@mapNotNull null
+                    port to serve.string("target")
+                })
         }
         loaded = true
     }
@@ -170,6 +188,15 @@ internal object TailscaleState {
         run("保存…") { apply(listOf(op("tailscale.set", name, values))); notice = "已保存并重启服务" }
     }
 
+    fun setServe(name: String, serve: List<Pair<Int, String>>) {
+        notice = ""
+        val list = JsonArray(serve.map { (port, target) -> JsonObject(mapOf("port" to JsonPrimitive(port), "target" to JsonPrimitive(target))) })
+        run("保存端口转发…") {
+            apply(listOf(JsonObject(mapOf("op" to JsonPrimitive("tailscale.serve"), "name" to JsonPrimitive(name), "serve" to list))))
+            notice = "已保存并重启服务"
+        }
+    }
+
     fun delete(name: String) {
         notice = ""
         run("删除 $name…") { apply(listOf(op("tailscale.delete", name))); notice = "已删除 $name；登录状态仍保留在数据目录，重新添加时会继续使用" }
@@ -191,7 +218,7 @@ internal object TailscaleState {
         }
     }
 
-    fun startLogin(name: String, restart: Boolean = false) {
+    fun startLogin(name: String, restart: Boolean = false, connect: Boolean = false) {
         poll?.cancel()
         loginFor = name
         loginUrl = ""
@@ -207,8 +234,8 @@ internal object TailscaleState {
                     LiveOverview.invalidate()
                     if (!request("status").boolean("running")) error("服务没有运行（可能因 Wi-Fi 条件暂停），无法登录")
                 }
-                loginMessage = "正在获取登录链接…"
-                val result = request("tailscaleLogin", json("name" to name, "wait" to 12))
+                loginMessage = if (connect) "正在连接 Tailscale…" else "正在获取登录链接…"
+                val result = request("tailscaleLogin", json("name" to name, "wait" to if (connect) 25 else 15))
                 val url = (result["url"] as? JsonPrimitive)?.contentOrNull.orEmpty()
                 when {
                     url.isNotEmpty() -> {
@@ -221,7 +248,13 @@ internal object TailscaleState {
                     result.boolean("running") -> finishLogin(name)
                     else -> {
                         loginMissed = true
-                        loginMessage = "没有拿到登录链接：tsnet 可能已经在运行。重启服务后再获取一次。"
+                        val problem = result.string("error")
+                        loginMessage = when {
+                            problem.isNotEmpty() -> "没有登录成功：$problem"
+                            result.boolean("kernel") && result.string("state") == "NeedsMachineAuth" -> "已连接，等待 Tailnet 管理员在后台批准这台设备。"
+                            result.boolean("kernel") -> "还没有登录成功（状态：${result.string("state").ifEmpty { "未知" }}）。auth key 可能已失效或过期，可以删除 auth key 后改用网页登录。"
+                            else -> "没有拿到登录链接：tsnet 可能已经在运行。重启服务后再获取一次。"
+                        }
                     }
                 }
             } catch (cancelled: CancellationException) {
@@ -304,6 +337,7 @@ fun TailscalePage(onBack: () -> Unit) {
     var removing by remember { mutableStateOf<TailscaleEntry?>(null) }
     var leaving by remember { mutableStateOf<TailscaleEntry?>(null) }
     var adding by remember { mutableStateOf(false) }
+    var serving by remember { mutableStateOf<TailscaleEntry?>(null) }
     LaunchedEffect(Unit) { state.load(force = true) }
     Page(title = "Tailscale", navigationIcon = { BackIcon(onBack) }) {
         banner(state.busy, BannerKind.Progress, "busy")
@@ -322,21 +356,30 @@ fun TailscalePage(onBack: () -> Unit) {
         }
         for (entry in state.entries) {
             group(entry.name, "ts:${entry.name}") {
-                InfoRow("登录状态", if (entry.loggedIn) "已登录" else "未登录", valueColor = if (entry.loggedIn) Tone.success else Tone.warning,
-                    summary = if (!entry.loggedIn && entry.authKey) "已填写 auth key，服务启动并有流量时自动登录" else null)
+                val (label, tone) = statusLabel(entry)
+                InfoRow("状态", label, valueColor = tone, summary = statusSummary(entry))
+                if (entry.problem.isNotEmpty()) Caption(entry.problem, Tone.warning)
                 if (entry.login.isNotEmpty()) InfoRow("账号", entry.login)
                 if (entry.tailnet.isNotEmpty()) InfoRow("Tailnet", entry.tailnet)
-                if (entry.magicDns.isNotEmpty()) InfoRow("MagicDNS", entry.magicDns)
+                if (entry.dnsName.isNotEmpty()) InfoRow("域名", entry.dnsName)
+                else if (entry.magicDns.isNotEmpty()) InfoRow("MagicDNS", entry.magicDns)
+                if (entry.ips.isNotEmpty()) InfoRow("Tailnet 地址", entry.ips.joinToString("\n"))
                 val hostname = entry.fields.firstOrNull { it.id == "hostname" }?.let { fieldText(it.value) }.orEmpty()
                 ArrowRow("设置", "设备名、登录密钥、共享的网段与出口节点", value = hostname, enabled = state.busy.isEmpty()) { editing = entry }
-                if (entry.stateDir.isEmpty()) Caption("登录信息没有保存在模块数据目录里，这里无法显示是否已登录", Tone.warning)
+                ArrowRow("端口转发", "让 Tailnet 里的设备访问本机上的网页服务",
+                    value = if (entry.serve.isEmpty()) "未设置" else "${entry.serve.size} 个", enabled = state.busy.isEmpty()) { serving = entry }
+                if (entry.stateDir.isEmpty() && !entry.kernel) Caption("登录信息没有保存在模块数据目录里，这里无法显示是否已登录", Tone.warning)
                 ButtonRow(Modifier.padding(top = 4.dp)) {
-                    if (entry.loggedIn) {
-                        ActionButton("退出登录", enabled = state.busy.isEmpty()) { leaving = entry }
-                    } else {
-                        ActionButton("网页登录", primary = true, enabled = state.busy.isEmpty() && entry.stateDir.isNotEmpty()) { state.startLogin(entry.name) }
+                    val idle = state.busy.isEmpty()
+                    when {
+                        entry.loggedIn -> {
+                            if (entry.kernel && entry.state == "NotStarted") ActionButton("立即连接", enabled = idle) { state.startLogin(entry.name, connect = true) }
+                            ActionButton("退出登录", enabled = idle) { leaving = entry }
+                        }
+                        entry.authKey -> ActionButton("立即连接", primary = true, enabled = idle) { state.startLogin(entry.name, connect = true) }
+                        else -> ActionButton("网页登录", primary = true, enabled = idle && (entry.stateDir.isNotEmpty() || entry.kernel)) { state.startLogin(entry.name) }
                     }
-                    ActionButton("删除", enabled = state.busy.isEmpty()) { removing = entry }
+                    ActionButton("删除", enabled = idle) { removing = entry }
                 }
             }
         }
@@ -346,6 +389,7 @@ fun TailscalePage(onBack: () -> Unit) {
     }
     AddSheet(adding, onDismiss = { adding = false })
     EditSheet(editing, onDismiss = { editing = null })
+    ServeSheet(serving, onDismiss = { serving = null })
     LoginSheet()
     ConfirmDialog(show = removing != null, title = "删除 ${removing?.name.orEmpty()}",
         summary = "同时删除指向它的规则与策略组成员，然后重启服务。", confirm = "删除", danger = true,
@@ -358,6 +402,81 @@ fun TailscalePage(onBack: () -> Unit) {
         onDismiss = { leaving = null }) {
         leaving?.let { state.logout(it.name) }
         leaving = null
+    }
+}
+
+@Composable
+private fun statusLabel(entry: TailscaleEntry): Pair<String, Color> = when (entry.state) {
+    "Running" -> "在线" to Tone.success
+    "Starting" -> "连接中" to Tone.muted
+    "NeedsLogin" -> "需要登录" to Tone.warning
+    "NeedsMachineAuth" -> "等待管理员批准" to Tone.warning
+    "Stopped" -> "已停止" to Tone.muted
+    "NoState" -> "初始化中" to Tone.muted
+    "NotStarted" -> if (entry.loggedIn) "已登录，未启动" to Tone.success else "未启动" to Tone.muted
+    else -> if (entry.loggedIn) "已登录" to Tone.success else "未登录" to Tone.warning
+}
+
+private fun statusSummary(entry: TailscaleEntry): String? = when {
+    entry.state == "NotStarted" -> "第一次访问 Tailnet 时自动启动，也可以点「立即连接」"
+    !entry.loggedIn && entry.authKey && !entry.kernel -> "已填写 auth key，服务启动并有流量时自动登录"
+    !entry.loggedIn && entry.authKey -> "已填写 auth key，点「立即连接」登录"
+    else -> null
+}
+
+private val serveHttp = Regex("^http://(\\d{1,3}(\\.\\d{1,3}){3}|\\[[0-9A-Fa-f:.]+]):(\\d{1,5})/?$")
+private val serveUnix = Regex("^unix:(//)?\\S+$")
+
+/** 端口转发：Tailnet 端口 → 本机 http://IP:端口 或 unix 套接字（tailscale serve，仅 HTTP）。 */
+@Composable
+private fun ServeSheet(entry: TailscaleEntry?, onDismiss: () -> Unit) {
+    val state = TailscaleState
+    var list by remember(entry) { mutableStateOf(entry?.serve.orEmpty()) }
+    var port by remember(entry) { mutableStateOf("") }
+    var target by remember(entry) { mutableStateOf("http://127.0.0.1:") }
+    var error by remember(entry) { mutableStateOf("") }
+    val host = entry?.dnsName?.ifEmpty { null }
+        ?: entry?.fields?.firstOrNull { it.id == "hostname" }?.let { fieldText(it.value) }?.ifEmpty { null } ?: "设备名"
+    Sheet(show = entry != null, title = "端口转发", onDismissRequest = onDismiss) {
+        Column(Modifier.fillMaxWidth().padding(bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Caption("Tailnet 里的设备打开 http://$host:端口/ 时，转到本机的网页服务。只支持 HTTP；目标填 http://IP:端口（如 http://127.0.0.1:8080）或 unix:套接字路径。")
+            if (entry?.webui == true) Caption("80 端口已用于网页管理。")
+            if (list.isNotEmpty()) {
+                Card(colors = CardDefaults.defaultColors(color = MiuixTheme.colorScheme.secondaryContainer)) {
+                    for (item in list) {
+                        ArrowRow("${item.first} → ${item.second}", "点按移除") { list = list - item }
+                    }
+                }
+            }
+            InputField("Tailnet 端口", port) { port = it.filter(Char::isDigit).take(5); error = "" }
+            InputField("转发到", target) { target = it.trim(); error = "" }
+            if (error.isNotEmpty()) Text(error, fontSize = 13.sp, color = Tone.danger)
+            TextButton("添加一条", modifier = Modifier.fillMaxWidth(), onClick = {
+                val number = port.toIntOrNull()
+                val http = serveHttp.find(target)
+                error = when {
+                    number == null || number !in 1..65535 -> "端口必须是 1–65535"
+                    number == 80 && entry?.webui == true -> "80 端口已用于网页管理"
+                    list.any { it.first == number } -> "端口 $number 已存在"
+                    http == null && !serveUnix.matches(target) -> "目标须为 http://IP:端口 或 unix:路径"
+                    http != null && (http.groupValues[3].toIntOrNull() ?: 0) !in 1..65535 -> "目标端口无效"
+                    else -> {
+                        list = list + (number to target.removeSuffix("/"))
+                        port = ""
+                        target = "http://127.0.0.1:"
+                        ""
+                    }
+                }
+            })
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                TextButton("取消", onClick = onDismiss, modifier = Modifier.weight(1f))
+                TextButton("保存并重启", modifier = Modifier.weight(1f), enabled = entry != null && list != entry.serve && state.busy.isEmpty(),
+                    colors = ButtonDefaults.textButtonColorsPrimary(), onClick = {
+                        entry?.let { state.setServe(it.name, list) }
+                        onDismiss()
+                    })
+            }
+        }
     }
 }
 

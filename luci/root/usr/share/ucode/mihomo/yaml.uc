@@ -33,6 +33,21 @@ function query(file, expr) {
 	}
 }
 
+// 只检查 YAML 语法（不跑 mihomo -t），编辑器输入停顿后调用。返回 null 表示没有 yq。
+function syntax(file) {
+	if (!available())
+		return null;
+	let r = U.run('{ ' + yq(sprintf('-o=json %s', U.shq(file))) + ' 2>&1 >/dev/null; }');
+	if (r.code == 0)
+		return { valid: true };
+	let msg = trim(r.out);
+	msg = replace(msg, /^Error: (bad file '[^']*': )?/, '');
+	msg = replace(msg, /^(yaml|go-yaml load error in parser|go-yaml load error)[: ]+/, '');
+	// 新版 yq：「at L1.C1-L4.C2: …」，出错位置是区间的末尾；旧版：「line 4: …」
+	let m = match(msg, /L[0-9]+\.C[0-9]+-L([0-9]+)\.C[0-9]+/) ?? match(msg, /L([0-9]+)\.C[0-9]+/) ?? match(msg, /line ([0-9]+)/);
+	return { valid: false, error: msg, line: m ? int(m[1]) : null };
+}
+
 // 没有 yq 或文件有语法错误时的退路：读取顶层标量。
 function top_scalar(text, key) {
 	let re = regexp('^' + key + ':[ \t]*(.*)$');
@@ -324,5 +339,5 @@ function commit(file, work) {
 	return (result != null && U.write_file(file, result)) ? null : '无法写回候选配置';
 }
 
-export { MODES, available, query, top_scalar, parse_listen, local_host, controller_of, runtime_delta,
+export { MODES, available, query, syntax, top_scalar, parse_listen, local_host, controller_of, runtime_delta,
 	sections, unescape_astral, edit, commit };

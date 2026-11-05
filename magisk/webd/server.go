@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -20,6 +21,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -33,7 +35,7 @@ import (
 var loginPage []byte
 
 // scripts 是网页可以调用的模块脚本；每个脚本自己校验子命令与参数。
-var scripts = []string{"apply.sh", "backup.sh", "core.sh", "discovery.sh", "host.sh", "mihomo.sh", "onboarding.sh", "policy.sh", "tailscale.sh", "webui.sh"}
+var scripts = []string{"apply.sh", "backup.sh", "core.sh", "discovery.sh", "host.sh", "mihomo.sh", "onboarding.sh", "policy.sh", "substore.sh", "tailscale.sh", "webui.sh"}
 
 var envNames = []string{"MIHOMO_SECRET"}
 
@@ -190,15 +192,13 @@ func (s *Server) originAllowed(config Config, who caller) bool {
 	}
 }
 
-// passwordless 判定无需登录即可使用：Tailnet 身份免密，或局域网免密（本机回环始终要密码）。
+// passwordless 判定无需登录即可使用：Tailnet 身份免密；本机与局域网在 require_password 关闭或没有密码时免密。
 func (s *Server) passwordless(config Config, who caller) bool {
 	switch who.origin {
 	case originTailscale:
 		return config.TailscaleNoPassword && who.login != "" && config.tailscaleUserAllowed(who.login)
-	case originLAN:
-		return !config.RequirePassword
 	default:
-		return false
+		return !config.RequirePassword || config.Password == nil
 	}
 }
 
@@ -555,10 +555,69 @@ func (s *Server) handleStatic(writer http.ResponseWriter, request *http.Request)
 	} else if kind := mime.TypeByExtension(ext); kind != "" {
 		writer.Header().Set("Content-Type", kind)
 	}
-	if name == "/index.html" {
+	// 文件名带内容哈希的 wasm 长期缓存；其余文件每次按修改时间协商（未变化时返回 304）
+	if strings.HasSuffix(name, ".wasm") && hashedAsset.MatchString(path.Base(name)) {
+		writer.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
 		writer.Header().Set("Cache-Control", "no-cache")
 	}
+	if compressible(name) && strings.Contains(request.Header.Get("Accept-Encoding"), "gzip") {
+		if data, err := s.gzipped(file, info); err == nil {
+			writer.Header().Set("Content-Encoding", "gzip")
+			writer.Header().Add("Vary", "Accept-Encoding")
+			http.ServeContent(writer, request, name, info.ModTime(), bytes.NewReader(data))
+			return
+		}
+	}
 	http.ServeFile(writer, request, file)
+}
+
+var hashedAsset = regexp.MustCompile(`^[0-9a-f]{16,}\.wasm$`)
+
+func compressible(name string) bool {
+	switch strings.ToLower(path.Ext(name)) {
+	case ".wasm", ".js", ".mjs", ".css", ".html", ".json", ".svg", ".otf", ".ttf", ".map", ".txt":
+		return true
+	}
+	return false
+}
+
+type gzipEntry struct {
+	modified time.Time
+	size     int64
+	data     []byte
+}
+
+var (
+	gzipMu    sync.Mutex
+	gzipCache = map[string]gzipEntry{}
+)
+
+// gzipped 压缩一次后缓存在内存里（按文件修改时间与大小失效）；webroot 只有十几 MB，压缩后约三分之一。
+func (s *Server) gzipped(file string, info os.FileInfo) ([]byte, error) {
+	gzipMu.Lock()
+	entry, ok := gzipCache[file]
+	gzipMu.Unlock()
+	if ok && entry.modified.Equal(info.ModTime()) && entry.size == info.Size() {
+		return entry.data, nil
+	}
+	raw, err := os.ReadFile(file)
+	if err != nil {
+		return nil, err
+	}
+	var buffer bytes.Buffer
+	writer, _ := gzip.NewWriterLevel(&buffer, gzip.BestCompression)
+	if _, err := writer.Write(raw); err != nil {
+		return nil, err
+	}
+	if err := writer.Close(); err != nil {
+		return nil, err
+	}
+	data := buffer.Bytes()
+	gzipMu.Lock()
+	gzipCache[file] = gzipEntry{modified: info.ModTime(), size: info.Size(), data: data}
+	gzipMu.Unlock()
+	return data, nil
 }
 
 // listen 打开 TCP 与 unix socket 监听，并把来源写进请求上下文。

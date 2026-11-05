@@ -104,7 +104,20 @@
 .mh-editor{display:flex;height:min(68vh,720px);border:1px solid var(--hairline,#e3e6ea);border-radius:var(--radius-base,.5rem);overflow:hidden;background:var(--surface,#fff)}
 .mh-gutter{margin:0;padding:10px 8px 10px 10px;min-width:48px;text-align:right;overflow:hidden;user-select:none;background:var(--surface-sunken,#f4f7fa);color:var(--text-subtle,#7f858b);border-right:1px solid var(--hairline,#e3e6ea)}
 .mh-code{flex:1 1 auto;margin:0;padding:10px 12px;border:0;outline:0;resize:none;white-space:pre;overflow:auto;background:transparent;color:var(--text,#1d232a);tab-size:2}
-.mh-gutter,.mh-code{font:12.5px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.mh-gutter,.mh-code,.mh-hl{font:12.5px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.mh-code-wrap{position:relative;flex:1 1 auto;display:flex;min-width:0}
+.mh-code-wrap>.mh-code{position:relative;z-index:1}
+.mh-hl{position:absolute;inset:0;margin:0;padding:10px 12px;white-space:pre;overflow:hidden;pointer-events:none;color:var(--text,#1d232a);tab-size:2;display:none}
+.mh-hl-on>.mh-hl{display:block}
+.mh-hl-on>.mh-code{color:transparent;caret-color:var(--text,#1d232a)}
+.mh-hl-on>.mh-code::selection{color:transparent;background:color-mix(in srgb,var(--mh-accent,#3b82f6) 30%,transparent)}
+.mh-hl-key{color:color-mix(in srgb,#2f81f7 75%,var(--text,#1d232a))}
+.mh-hl-str{color:color-mix(in srgb,#3fa34d 75%,var(--text,#1d232a))}
+.mh-hl-num{color:color-mix(in srgb,#e8833a 80%,var(--text,#1d232a))}
+.mh-hl-mark{color:color-mix(in srgb,#a371f7 75%,var(--text,#1d232a))}
+.mh-hl-cmt{color:var(--text-subtle,#7f858b);font-style:italic}
+.mh-hl-err{background:color-mix(in srgb,#e5484d 18%,transparent);text-decoration:underline wavy #e5484d}
+.mh-lint{margin-top:8px;font-size:.82rem;min-height:1.4em}
 .mh-result{margin-top:10px}
 .mh-badge{display:inline-block;padding:1px 8px;border-radius:99px;font-size:.72rem;font-weight:600;background:color-mix(in srgb,var(--mh-mid) 16%,transparent);color:var(--mh-mid-t)}
 .mh-table{width:100%;border-collapse:collapse;font-size:.82rem}

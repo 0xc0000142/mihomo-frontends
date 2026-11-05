@@ -51,6 +51,8 @@ import top.yukonga.miuix.kmp.icon.extended.Layers
 import top.yukonga.miuix.kmp.icon.extended.Info
 import top.yukonga.miuix.kmp.icon.extended.File
 import top.yukonga.miuix.kmp.icon.extended.Notes
+import top.yukonga.miuix.kmp.icon.extended.Download
+import top.yukonga.miuix.kmp.icon.extended.Backup
 import top.yukonga.miuix.kmp.preference.CheckboxPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
@@ -443,6 +445,7 @@ fun SettingsPage(onNavigate: (String) -> Unit) {
     val draft = state.draft
     var editSsid by remember { mutableStateOf(false) }
     var dashboardError by remember { mutableStateOf("") }
+    var dashboardNotice by remember { mutableStateOf("") }
     Box(Modifier.fillMaxSize()) {
         Page(title = "设置", bottomPadding = if (state.dirty) 88.dp else 0.dp, actions = {
             BarAction(MiuixIcons.Regular.Refresh, "重新读取", enabled = !state.policyLoading && !state.saving) { state.loadPolicy() }
@@ -450,6 +453,7 @@ fun SettingsPage(onNavigate: (String) -> Unit) {
             banner(if (state.policyLoading || state.saving) (state.notice ?: "读取中…") else "", BannerKind.Progress, "progress")
             banner(state.policyError.orEmpty(), BannerKind.Error, "error")
             banner(dashboardError, BannerKind.Error, "dashboard")
+            banner(dashboardNotice, BannerKind.Success, "dashboardNotice")
             if (!state.policyLoading && !state.saving) banner(state.notice.orEmpty(), BannerKind.Success, "notice")
             if (draft == null) {
                 if (!state.policyLoading) item(key = "retry") {
@@ -496,6 +500,7 @@ fun SettingsPage(onNavigate: (String) -> Unit) {
             group("代理与内核") {
                 ArrowRow("内核配置", "订阅、分流规则、DNS 与透明代理参数", startIcon = MiuixIcons.Regular.Tune) { onNavigate("profile") }
                 ArrowRow("内核版本", "下载、更新或回滚 mihomo 内核", startIcon = MiuixIcons.Regular.Update) { onNavigate("core") }
+                ArrowRow("Sub-Store", "合并、筛选多个机场订阅后交给内核", startIcon = MiuixIcons.Regular.Backup) { onNavigate("substore") }
             }
             group("远程访问") {
                 ArrowRow("网页管理", "在其它设备的浏览器里管理本模块", startIcon = MiuixIcons.Regular.Link) { onNavigate("webui") }
@@ -503,6 +508,12 @@ fun SettingsPage(onNavigate: (String) -> Unit) {
                 ArrowRow("zashboard 面板", if (Dashboard.opening) "正在打开…" else "功能更全的代理面板，在浏览器里打开",
                     startIcon = MiuixIcons.Regular.Info) {
                     Dashboard.open { message -> dashboardError = message }
+                }
+                ArrowRow("更新面板", if (Dashboard.upgrading) "正在下载…" else "下载最新版 zashboard（或配置里指定的面板）",
+                    startIcon = MiuixIcons.Regular.Download, enabled = !Dashboard.upgrading) {
+                    dashboardError = ""
+                    dashboardNotice = ""
+                    Dashboard.upgrade({ dashboardNotice = it }) { dashboardError = it }
                 }
             }
             group("维护") {

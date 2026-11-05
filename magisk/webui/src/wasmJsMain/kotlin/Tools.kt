@@ -13,6 +13,9 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.background
+import androidx.compose.ui.draw.clip
+import top.yukonga.miuix.kmp.icon.extended.Report
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -30,6 +33,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonObject
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
+import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.LinearProgressIndicator
 import top.yukonga.miuix.kmp.basic.TextButton
@@ -270,6 +274,16 @@ private object ToolsLogs {
         content = request("logs", json("lines" to 300)).string("content")
         status = ""
     }
+
+    // 诊断信息：设备、root、模块、内核、网络与最近日志（已脱敏），展示后由用户点按复制
+    var diagnostics by mutableStateOf<String?>(null)
+    var copied by mutableStateOf("")
+
+    fun collect() = work.run("收集诊断信息…") {
+        copied = ""
+        diagnostics = request("diagnostics").string("content")
+        status = ""
+    }
 }
 
 /** 工作状态提示条：进行中 / 成功 / 失败。 */
@@ -288,6 +302,9 @@ fun ConfigPage(onBack: () -> Unit, onNavigate: (String) -> Unit) {
     var editing by remember { mutableStateOf(false) }
     var confirmSave by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { if (!state.attempted || (state.externalChange && !state.dirty)) state.read() }
+    val highlighter = rememberYamlHighlighter()
+    val problems = rememberYamlLint(state.content, enabled = editing || state.dirty)
+    val errors = problems.orEmpty().filter { it.error }
     Box(Modifier.fillMaxSize()) {
         Page(title = "配置文件", navigationIcon = { BackIcon(onBack) }, actions = {
             BarAction(MiuixIcons.Regular.Refresh, "重新读取", enabled = toolsIdle) {
@@ -306,7 +323,7 @@ fun ConfigPage(onBack: () -> Unit, onNavigate: (String) -> Unit) {
             if (state.dirty) item(key = "save") {
                 ButtonRow {
                     ActionButton("放弃修改", enabled = toolsIdle) { state.content = state.baseline }
-                    ActionButton("保存", primary = true, enabled = toolsIdle) { confirmSave = true }
+                    ActionButton("保存", primary = true, enabled = toolsIdle && errors.isEmpty()) { confirmSave = true }
                 }
             }
             if (state.loaded) group("预览", "preview") {
@@ -317,10 +334,22 @@ fun ConfigPage(onBack: () -> Unit, onNavigate: (String) -> Unit) {
     Sheet(show = editing, title = "编辑 config.yaml", onDismissRequest = { editing = false }) {
         Column(Modifier.fillMaxWidth().padding(bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             TextField(value = state.content, onValueChange = { state.content = it }, modifier = Modifier.fillMaxWidth().heightIn(min = 240.dp, max = 520.dp),
-                textStyle = MiuixTheme.textStyles.main.copy(fontFamily = FontFamily.Monospace, fontSize = 12.sp))
+                textStyle = MiuixTheme.textStyles.main.copy(fontFamily = FontFamily.Monospace, fontSize = 12.sp),
+                visualTransformation = highlighter)
+            when {
+                problems == null -> Unit
+                problems.isEmpty() -> Text("YAML 格式正确", fontSize = 13.sp, color = Tone.success)
+                else -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    for (problem in problems.take(5)) {
+                        Text((if (problem.line > 0) "第 ${problem.line} 行第 ${problem.col} 列：" else "") + problem.message,
+                            fontSize = 13.sp, lineHeight = 18.sp, color = if (problem.error) Tone.danger else Tone.warning)
+                    }
+                    if (problems.size > 5) Text("还有 ${problems.size - 5} 处问题", fontSize = 12.sp, color = Tone.muted)
+                }
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 TextButton("完成", onClick = { editing = false }, modifier = Modifier.weight(1f))
-                TextButton("保存", onClick = { editing = false; confirmSave = true }, enabled = state.dirty && toolsIdle,
+                TextButton("保存", onClick = { editing = false; confirmSave = true }, enabled = state.dirty && toolsIdle && errors.isEmpty(),
                     modifier = Modifier.weight(1f), colors = ButtonDefaults.textButtonColorsPrimary())
             }
         }
@@ -481,6 +510,7 @@ fun LogsPage(onBack: () -> Unit) {
         }
     }
     Page(title = "日志", subtitle = "最近 300 行，最新的在上", navigationIcon = { BackIcon(onBack) }, actions = {
+        BarAction(MiuixIcons.Regular.Report, "诊断信息", enabled = toolsIdle) { state.collect() }
         BarAction(MiuixIcons.Regular.Refresh, "刷新", enabled = toolsIdle) { state.refresh() }
     }) {
         if (toolsActiveWork === state.work) banner(state.work.status, BannerKind.Progress, "work")
@@ -497,6 +527,28 @@ fun LogsPage(onBack: () -> Unit) {
             }
             if (shown.isEmpty()) item(key = "none") { EmptyState(MiuixIcons.Regular.Notes, "没有匹配的日志") }
             items(shown.size) { index -> LogLine(shown[index]) }
+        }
+    }
+    val report = state.diagnostics
+    Sheet(show = report != null, title = "诊断信息", onDismissRequest = { state.diagnostics = null }) {
+        Column(Modifier.fillMaxWidth().padding(bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("包含设备、Root、模块与内核版本、网络状态和最近日志。订阅链接、密钥、UUID 与公网地址已隐去，反馈问题时整段粘贴即可。",
+                fontSize = 13.sp, lineHeight = 18.sp, color = Tone.muted)
+            androidx.compose.foundation.text.selection.SelectionContainer {
+                Text(report.orEmpty(), fontSize = 11.sp, lineHeight = 15.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                    color = MiuixTheme.colorScheme.onSurface,
+                    modifier = Modifier.fillMaxWidth().heightIn(max = 360.dp)
+                        .clip(androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
+                        .background(MiuixTheme.colorScheme.secondaryContainer)
+                        .verticalScroll(androidx.compose.foundation.rememberScrollState()).padding(12.dp))
+            }
+            if (state.copied.isNotEmpty()) Text(state.copied, fontSize = 13.sp, color = Tone.success)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                TextButton("关闭", onClick = { state.diagnostics = null }, modifier = Modifier.weight(1f))
+                TextButton("复制全部", modifier = Modifier.weight(1f), colors = ButtonDefaults.textButtonColorsPrimary(), onClick = {
+                    state.copied = if (copyText(report.orEmpty())) "已复制到剪贴板" else "复制失败，请长按文字手动选择"
+                })
+            }
         }
     }
 }

@@ -56,7 +56,20 @@ func main() {
 		if len(args) != 1 {
 			fail(errors.New("缺少设置"))
 		}
-		fail(setConfig(*configPath, args[0]))
+		before, _ := loadConfig(*configPath)
+		if err := setConfig(*configPath, args[0]); err != nil {
+			fail(err)
+		}
+		// 一次返回新设置，脚本不必再调用 get；端口或局域网监听变化时需要重启服务
+		config, err := loadConfig(*configPath)
+		if err != nil {
+			fail(err)
+		}
+		out := publicConfig(config)
+		out["ok"] = true
+		out["addrs"] = localAddrs()
+		out["listen_changed"] = before.Port != config.Port || before.LAN != config.LAN
+		emit(out)
 	case "passwd":
 		if len(args) != 1 {
 			fail(errors.New("缺少密码"))

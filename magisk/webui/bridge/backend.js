@@ -107,8 +107,8 @@
   }
 
   // 网页管理（mihomo-webd）：没有 ksu 时经同源 api/run 调用脚本子命令；只允许 SCRIPTS 中的脚本，不执行任意 shell。
-  const SCRIPTS = ['apply.sh', 'backup.sh', 'core.sh', 'discovery.sh', 'host.sh', 'mihomo.sh', 'onboarding.sh', 'policy.sh', 'tailscale.sh', 'webui.sh'];
-  const ENV_NAMES = ['MIHOMO_SECRET'];
+  const SCRIPTS = ['apply.sh', 'backup.sh', 'core.sh', 'discovery.sh', 'host.sh', 'mihomo.sh', 'onboarding.sh', 'policy.sh', 'substore.sh', 'tailscale.sh', 'webui.sh'];
+  const ENV_NAMES = ['MIHOMO_SECRET', 'MIHOMO_API_TIMEOUT'];
 
   function remoteMode() {
     return !root.ksu && !!root.location && /^https?:$/.test(root.location.protocol);
@@ -269,7 +269,7 @@
 
   async function controllerFetch(base, detected, payload) {
     const abort = typeof AbortController === 'function' ? new AbortController() : null;
-    const timer = setTimeout(() => abort && abort.abort(), 10000);
+    const timer = setTimeout(() => abort && abort.abort(), payload.timeout || 10000);
     try {
       const headers = { Authorization: 'Bearer ' + detected.secret };
       const init = { method: payload.method || 'GET', headers, credentials: 'omit', cache: 'no-store', signal: abort ? abort.signal : undefined };
@@ -309,7 +309,14 @@
   async function controllerScript(detected, payload) {
     const args = [payload.method || 'GET', detected.address + payload.path];
     if (payload.body !== undefined) args.push(typeof payload.body === 'string' ? payload.body : JSON.stringify(payload.body));
-    const result = await run('host.sh', ['api'].concat(args), 15000, { MIHOMO_SECRET: detected.secret });
+    const env = { MIHOMO_SECRET: detected.secret };
+    let limit = 15000;
+    if (payload.timeout) {
+      const seconds = Math.ceil(payload.timeout / 1000);
+      env.MIHOMO_API_TIMEOUT = String(seconds);
+      limit = (seconds + 7) * 1000;
+    }
+    const result = await run('host.sh', ['api'].concat(args), limit, env);
     if (result.errno !== 0) throw new Error('控制器 curl 失败：' + (result.stderr || ('退出码 ' + result.errno + '')));
     const match = /\n__MIHOMO_HTTP__:(\d{3})\s*$/.exec(result.stdout);
     if (!match) throw new Error('控制器响应缺少 HTTP 状态码');
@@ -822,6 +829,7 @@
     return { ok: true, content: b64decode(result.stdout.trim()) };
   });
   register('configSchema', ['content'], (payload) => text(payload.content, 'content'), (payload) => engine().schema(payload.content));
+  register('yamlLint', ['content'], (payload) => text(payload.content, 'content'), (payload) => engine().lint(payload.content));
   register('configAnalyze', ['content'], (payload) => text(payload.content, 'content'), (payload) => engine().analyze(payload.content));
   register('configPatch', ['content', 'ops'], (payload) => {
     text(payload.content, 'content');
@@ -884,28 +892,85 @@
     if (!payload.name || payload.name.length > 128 || /[\r\n]/.test(payload.name)) throw new Error('出站名无效');
   };
 
+  // 新内核提供 /tailscale 接口：直接返回登录状态、登录链接与本机地址；旧内核（404）或服务未运行时退回读状态文件。
+  const tailscalePath = (name) => '/tailscale/' + encodeURIComponent(name).replace(/[!'()*]/g, (character) => '%' + character.charCodeAt(0).toString(16).toUpperCase());
+
+  function kernelTailscale(item) {
+    if (!item || typeof item !== 'object') return null;
+    const self = item.self && typeof item.self === 'object' ? item.self : {};
+    const state = typeof item.state === 'string' ? item.state : '';
+    return {
+      state,
+      loggedIn: state === 'Running' || state === 'Starting' || (typeof item.login === 'string' && item.login !== '' && state !== 'NeedsLogin'),
+      login: item.login || null,
+      tailnet: item.tailnet || null,
+      magicDns: item.magicDNSSuffix || null,
+      hostName: self.hostName || null,
+      dnsName: self.dnsName ? String(self.dnsName).replace(/\.$/, '') : null,
+      ips: Array.isArray(self.ips) ? self.ips.filter((ip) => typeof ip === 'string') : [],
+      authUrl: typeof item.authURL === 'string' && /^https?:\/\//.test(item.authURL) ? item.authURL : null,
+      error: typeof item.error === 'string' ? item.error : (Array.isArray(item.health) && item.health.length ? item.health.join('；') : null),
+      serve: Array.isArray(item.serve) ? item.serve : [],
+    };
+  }
+
+  async function kernelTailscaleList() {
+    try {
+      const status = await readStatus('');
+      if (!status.running) return null;
+      const result = await controller({ path: '/tailscale' });
+      return result.data && Array.isArray(result.data.tailscale) ? result.data.tailscale : null;
+    } catch (error) {
+      return null; // 旧内核没有该接口或控制器不可用
+    }
+  }
+
   register('tailscaleStatus', [], noValidation, async () => {
     const list = [];
+    const kernel = await kernelTailscaleList();
     for (const entry of await tailscaleEntries()) {
       const dir = tailscaleDir(entry.stateDir);
       const state = dir ? await shJson('tailscale.sh', ['state', dir]) : null;
-      list.push({ name: entry.name, stateDir: dir, authKey: entry.used, ...tailscaleProfile(state) });
+      const item = { name: entry.name, stateDir: dir, authKey: entry.used, kernel: kernel !== null, ...tailscaleProfile(state) };
+      const live = kernel && kernelTailscale(kernel.find((value) => value && value.name === entry.name));
+      if (live) {
+        // 节点未启动时内核不知道登录资料，保留状态文件里的账号信息
+        const merged = { ...item, ...Object.fromEntries(Object.entries(live).filter(([, value]) => value !== null)) };
+        if (live.state === 'NotStarted') merged.loggedIn = item.loggedIn;
+        list.push(merged);
+      } else {
+        list.push(item);
+      }
     }
-    return { ok: true, list };
+    return { ok: true, list, kernel: kernel !== null };
   });
   register('tailscaleLogin', ['name', 'wait'], (payload) => {
     tailscaleName(payload);
     if (payload.wait !== undefined && (!Number.isInteger(payload.wait) || payload.wait < 5 || payload.wait > 60)) throw new Error('wait 必须为 5–60 的整数');
   }, async (payload) => {
     await tailscaleEntry(payload.name);
-    const detected = await detectController();
     const wait = payload.wait || 20;
-    const path = encodeURIComponent(payload.name).replace(/[!'()*]/g, (character) => '%' + character.charCodeAt(0).toString(16).toUpperCase());
-    return shJson('tailscale.sh', ['login', detected.address, path, JSON.stringify(payload.name).slice(1, -1), String(wait)],
+    try {
+      const result = await controller({ path: tailscalePath(payload.name) + '/login?wait=' + wait, method: 'POST', timeout: (wait + 10) * 1000 });
+      const live = result.data && result.data.name === payload.name ? kernelTailscale(result.data) : null;
+      if (live) return { ok: true, url: live.authUrl, running: live.state === 'Running', state: live.state, error: live.error, kernel: true };
+    } catch (error) {
+      // 内核明确报错（如启动失败）时直接返回；接口不存在（旧内核）或控制器不可用时走旧方式
+      if (/控制器 HTTP (?!404)\d{3}/.test(error.message)) throw new Error('登录失败：' + error.message);
+    }
+    // 旧内核：订阅日志并用测速唤醒节点，从日志里取登录链接
+    const detected = await detectController();
+    return shJson('tailscale.sh', ['login', detected.address, tailscalePath(payload.name).slice('/tailscale/'.length), JSON.stringify(payload.name).slice(1, -1), String(wait)],
       (wait + 20) * 1000, { MIHOMO_SECRET: detected.secret });
   });
   register('tailscaleLogout', ['name'], tailscaleName, async (payload) => {
     const { dir } = await tailscaleEntry(payload.name);
+    try {
+      const result = await controller({ path: tailscalePath(payload.name) + '/logout', method: 'POST', timeout: 20000 });
+      if (result.data === null) return { ok: true, restarted: false, kernel: true };
+    } catch (error) {
+      if (/控制器 HTTP (?!404|503)\d{3}/.test(error.message)) throw new Error('退出登录失败：' + error.message);
+    }
     return shJson('tailscale.sh', ['logout', dir], 120000);
   });
   register('openUrl', ['url'], (payload) => httpUrl(payload.url, 'url'), (payload) => {
@@ -990,6 +1055,104 @@
     params.set('hostname', host);
     params.set('port', port);
     return { ok: true, available: true, url: detected.address + '/ui/#/setup?' + params.toString() };
+  });
+
+  // 诊断信息：去掉订阅链接、密钥、UUID、公网地址等后再交给页面复制
+  function redact(text) {
+    return text
+      .replace(/\b(https?|wss?|ss|ssr|vmess|vless|trojan|hysteria2?|hy2|tuic|anytls|socks5?):\/\/[^\s'"]+/gi, (match, scheme) => scheme + '://***')
+      .replace(/((?:secret|password|passwd|auth-key|authkey|token|private-key|pre-shared-key|psk|uuid|sid|short-id|public-key|key)\s*[:=]\s*)("[^"]*"|'[^']*'|\S+)/gi, '$1***')
+      .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, '***-uuid')
+      .replace(/\btskey-[A-Za-z0-9-]+/g, 'tskey-***')
+      .replace(/[A-Za-z0-9+/_-]{40,}={0,2}/g, '***')
+      .replace(/\b(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\b/g, (match, a, b) => {
+        const first = Number(a);
+        const second = Number(b);
+        const local = first === 10 || first === 127 || first === 0 || (first === 192 && second === 168) || (first === 172 && second >= 16 && second < 32)
+          || (first === 100 && second >= 64 && second < 128) || (first === 169 && second === 254) || (first === 198 && (second === 18 || second === 19)) || first >= 224;
+        return local ? match : a + '.' + b + '.x.x';
+      })
+      .replace(/\b(?:2[0-9a-f]{3}|3[0-9a-f]{3}):[0-9a-f:]{4,}/gi, (match) => match.split(':').slice(0, 2).join(':') + ':…');
+  }
+
+  register('diagnostics', [], noValidation, async () => {
+    const [info, status] = await Promise.all([run('host.sh', ['diag'], 30000), readStatus('').catch(() => null)]);
+    const lines = ['# mihomo-ebpf 诊断信息', '时间: ' + new Date().toISOString()];
+    if (status) lines.push('服务: ' + (status.running ? '运行中' : '未运行') + (status.paused ? '（Wi-Fi 条件暂停）' : '') + (status.uptime ? '，已运行 ' + status.uptime + ' 秒' : ''));
+    return { ok: true, content: redact(lines.join('\n') + '\n' + String(info.stdout || '')).slice(0, 200000) };
+  });
+
+  // ---------- Sub-Store ----------
+  // 本机运行时后端在 http://127.0.0.1:端口/路径，前端在同一端口的根路径；已有服务时 url 即后端地址。
+  const SUBSTORE_FRONTEND = 'https://sub-store.vercel.app/';
+
+  function substoreBase(status, host) {
+    if (status.mode === 'local') return 'http://' + (host || '127.0.0.1') + ':' + status.port + '/' + status.path;
+    if (status.mode === 'remote' && status.url) return status.url.replace(/\/+$/, '');
+    return '';
+  }
+
+  function substoreView(status) {
+    // 经网页管理从其它设备访问时，本机地址要换成手机的局域网地址（需开启 Sub-Store 局域网访问）
+    const remote = remoteMode();
+    const host = remote ? root.location.hostname : '127.0.0.1';
+    const reachable = status.mode === 'remote' || !remote || status.lan;
+    const base = substoreBase(status, host);
+    let open = '';
+    if (status.mode === 'local' && status.running && reachable) open = 'http://' + host + ':' + status.port + '/?api=' + encodeURIComponent(base);
+    if (status.mode === 'remote' && base) open = SUBSTORE_FRONTEND + '?api=' + encodeURIComponent(base);
+    return { ...status, base: substoreBase(status), open, reachable };
+  }
+
+  register('substoreStatus', [], noValidation, async () => substoreView(await shJson('substore.sh', ['status'])));
+  register('substoreSet', ['mode', 'port', 'lan', 'url'], (payload) => {
+    oneOf(payload.mode, ['off', 'local', 'remote'], '模式');
+    if (!Number.isInteger(payload.port) || payload.port < 1024 || payload.port > 65535) throw new Error('端口须为 1024–65535');
+    boolean(payload.lan, 'lan');
+    text(payload.url, 'url', true);
+    if (payload.url && (!/^https?:\/\/[^\s"']+$/.test(payload.url) || payload.url.length > 1024)) throw new Error('地址须为 http(s) 链接');
+    if (payload.mode === 'remote' && !payload.url) throw new Error('请填写 Sub-Store 后端地址');
+  }, async (payload) => substoreView(await shJson('substore.sh', ['set', payload.mode, String(payload.port), payload.lan ? '1' : '0',
+    payload.url ? b64encode(payload.url) : '-'], 60000)));
+  register('substoreInstall', ['what'], (payload) => oneOf(payload.what === undefined ? 'all' : payload.what, ['all', 'node', 'backend', 'frontend'], '下载项'),
+    async (payload) => substoreView(await shJson('substore.sh', ['install', payload.what || 'all'], 1200000)));
+  register('substoreService', ['action'], (payload) => oneOf(payload.action, ['start', 'stop', 'restart', 'reset-path', 'uninstall'], '操作'),
+    async (payload) => substoreView(await shJson('substore.sh', [payload.action], 60000)));
+  register('substoreList', [], noValidation, async () => {
+    const status = await shJson('substore.sh', ['status']);
+    const base = substoreBase(status);
+    if (!base) throw new Error('没有启用 Sub-Store');
+    const result = await run('substore.sh', ['list'], 40000);
+    if (result.errno !== 0) {
+      let message = result.stderr || '读取订阅失败';
+      try { message = JSON.parse(result.stdout).error || message; } catch (error) { /* 保留 stderr */ }
+      throw new Error(message);
+    }
+    const [subsText, collectionsText] = result.stdout.split('\n');
+    const items = (textValue) => {
+      try {
+        const body = JSON.parse(textValue);
+        return Array.isArray(body && body.data) ? body.data : [];
+      } catch (error) {
+        return [];
+      }
+    };
+    // target=ClashMeta 让 Sub-Store 输出 mihomo（Clash.Meta）格式的节点
+    const link = (kind, name) => base + '/download/' + (kind === 'collection' ? 'collection/' : '') + encodeURIComponent(name) + '?target=ClashMeta';
+    const list = [];
+    for (const item of items(subsText)) if (item && typeof item.name === 'string') list.push({ kind: 'sub', name: item.name, title: item.displayName || item['display-name'] || item.name, url: link('sub', item.name) });
+    for (const item of items(collectionsText)) if (item && typeof item.name === 'string') list.push({ kind: 'collection', name: item.name, title: item.displayName || item['display-name'] || item.name, url: link('collection', item.name) });
+    return { ok: true, list };
+  });
+
+  // 一键更新面板：内核按 external-ui-url 重新下载并解压到 external-ui 目录
+  register('dashboardUpgrade', [], noValidation, async () => {
+    const detected = await detectController();
+    if (!detected.ui) throw new Error('配置里没有 external-ui，面板未启用');
+    const status = await readStatus('');
+    if (!status.running) throw new Error('服务没有运行，无法更新面板');
+    await controller({ path: '/upgrade/ui', method: 'POST', timeout: 120000 });
+    return { ok: true };
   });
 
   root.mihomoBridge = Object.freeze({

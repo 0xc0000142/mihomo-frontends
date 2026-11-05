@@ -14,6 +14,53 @@ function logs(lines) {
 	return { ok: true, text: U.tail_lines(r.out, lines) };
 }
 
+// 诊断信息：系统、插件、内核与网络概况加最近日志，供用户复制后反馈问题。
+// 不含配置文件内容；浏览器端会再把链接、密钥与公网地址打码。
+function diagnostics() {
+	let out = [];
+	let section = (title) => push(out, '', '== ' + title + ' ==');
+	let cmd = (c, n) => {
+		let r = U.run(c);
+		let text = rtrim(r.out ?? '', '\n');
+		if (text != '')
+			push(out, U.tail_lines(text, n ?? 40));
+	};
+	section('系统');
+	let rel = fs.readfile('/etc/openwrt_release') ?? '';
+	let m = match(rel, /DISTRIB_DESCRIPTION='([^']*)'/);
+	push(out, '系统: ' + (m ? m[1] : '未知'));
+	cmd('uname -srm');
+	let model = trim(split(fs.readfile('/tmp/sysinfo/model') ?? '', '\n')[0] ?? '');
+	if (model != '')
+		push(out, '型号: ' + model);
+	cmd('cat /proc/meminfo | head -n 3');
+	section('软件包');
+	if (fs.access('/usr/bin/apk', 'x'))
+		cmd("apk list -I 2>/dev/null | grep -E 'mihomo|kmod-sched|yq|curl'");
+	else
+		cmd("opkg list-installed 2>/dev/null | grep -E 'mihomo|kmod-sched|yq|curl'");
+	section('内核');
+	if (fs.access(P.BIN, 'x'))
+		cmd(U.shq(P.BIN) + ' -v | head -n 2');
+	else
+		push(out, '未安装');
+	cmd(U.shq(P.INIT) + ' status');
+	push(out, '开机自启: ' + (length(fs.glob('/etc/rc.d/S??' + P.SERVICE) ?? []) > 0 ? '是' : '否'));
+	let st = fs.stat(P.CONFIG);
+	push(out, '配置文件: ' + (st ? st.size + ' 字节' : '不存在'));
+	section('网络');
+	cmd("ip -o addr show | awk '{print $2, $3, $4}'");
+	push(out, '-- ip rule');
+	cmd('ip rule show');
+	push(out, '-- 默认路由');
+	cmd("ip route show table all | grep -E '^default'", 10);
+	push(out, '-- tc 过滤器（eBPF）');
+	cmd("for d in $(ls /sys/class/net); do tc filter show dev $d ingress 2>/dev/null | grep -q bpf && echo \"$d: ingress bpf\"; done");
+	section('最近日志');
+	cmd('logread -e ' + U.shq(P.LOG_TAG), 150);
+	return { ok: true, text: join('\n', out) };
+}
+
 /* ---------- 局域网设备 ---------- */
 
 const MAC_RE = /^[0-9a-f]{2}(:[0-9a-f]{2}){5}$/;
@@ -242,4 +289,4 @@ function tailscale_logout(name) {
 	return removed ? { ok: true, restarted: was } : { ok: false, error: '删除状态目录失败：' + dir };
 }
 
-export { logs, merge_devices, devices, merge_interfaces, interfaces, ts_profile, ts_dir, tailscale_status, tailscale_logout };
+export { logs, diagnostics, merge_devices, devices, merge_interfaces, interfaces, ts_profile, ts_dir, tailscale_status, tailscale_logout };

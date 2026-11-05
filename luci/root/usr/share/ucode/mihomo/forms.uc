@@ -580,7 +580,7 @@ function sec_dns(ctx) {
 	return out;
 }
 
-const TS_FIELDS = ['hostname', 'auth-key', 'udp', 'accept-routes', 'advertise-routes', 'advertise-exit-node', 'listen-port'];
+const TS_FIELDS = ['hostname', 'auth-key', 'udp', 'accept-routes', 'advertise-routes', 'advertise-exit-node', 'listen-port', 'serve'];
 
 function ts_index(x, name) {
 	for (let i, p in arr(x.proxies))
@@ -1189,11 +1189,37 @@ function op_dns_set(op, ctx) {
 	return map_edits(['dns'], d, top_keys(ctx, 'dns') ?? [], vals);
 }
 
+// serve：Tailnet 端口 → 本机 HTTP 服务（http://IP:端口 或 unix:套接字），端口不能重复
+const SERVE_HTTP = regexp('^http://([0-9]{1,3}(\\.[0-9]{1,3}){3}|\\[[0-9A-Fa-f:.]+\\]):([0-9]{1,5})/?$');
+const SERVE_UNIX = regexp('^unix:(//)?[^ \t]+$');
+
+function serve_list(v) {
+	if (type(v) != 'array' || length(v) > 32)
+		return null;
+	let out = [], seen = {};
+	for (let e in v) {
+		let p = C.port(obj(e).port), t = C.text(obj(e).target, 512);
+		if (p == null || t == null || seen[p])
+			return null;
+		let m = match(t, SERVE_HTTP);
+		if (m) {
+			if (C.port(m[3]) == null)
+				return null;
+			t = replace(t, /\/$/, '');
+		} else if (!match(t, SERVE_UNIX))
+			return null;
+		seen[p] = true;
+		push(out, { port: p, target: t });
+	}
+	return out;
+}
+
 const TS_SPEC = {
 	hostname: (v) => (type(v) == 'string' && match(v, /^[A-Za-z0-9-]{1,63}$/)) ? v : null,
 	'auth-key': (v) => (C.text(v, 256) && index(v, ' ') < 0) ? C.text(v, 256) : null,
 	udp: (v) => C.bool(v), 'accept-routes': (v) => C.bool(v), 'advertise-exit-node': (v) => C.bool(v),
-	'advertise-routes': (v) => C.list(v, C.cidr, 64), 'listen-port': (v) => C.port0(v)
+	'advertise-routes': (v) => C.list(v, C.cidr, 64), 'listen-port': (v) => C.port0(v),
+	serve: serve_list
 };
 
 function op_tailscale_set(op, ctx) {

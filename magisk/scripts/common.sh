@@ -153,6 +153,27 @@ close_inherited_fds() {
 
 module_enabled() { [ ! -e "$MODDIR/disable" ] && [ ! -e "$MODDIR/remove" ]; }
 
+# 在 root 管理器的模块列表里显示运行状态：description 前加「状态 | 」，原说明保持不变
+module_status() {
+  status_prop=$MODDIR/module.prop
+  [ -f "$status_prop" ] && [ -w "$status_prop" ] || return 0
+  case "$1" in
+    running) status_text='✅ 运行中' ;;
+    paused) status_text='⏸️ 已暂停（Wi-Fi 条件）' ;;
+    *) status_text='⏹️ 已停止' ;;
+  esac
+  grep -qF "description=$status_text | " "$status_prop" 2>/dev/null && return 0
+  awk -v status="$status_text" '
+    index($0, "description=") == 1 {
+      text = substr($0, 13)
+      sub(/^(✅|⏸️|⏹️)[^|]*\| /, "", text)
+      print "description=" status " | " text
+      next
+    }
+    { print }
+  ' "$status_prop" >"$status_prop.$$.tmp" 2>/dev/null && mv -f "$status_prop.$$.tmp" "$status_prop" || rm -f "$status_prop.$$.tmp"
+}
+
 boot_intent() {
   boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null) || return 1
   if [ "$(cat "$RUN_DIR/boot-id" 2>/dev/null)" != "$boot_id" ]; then

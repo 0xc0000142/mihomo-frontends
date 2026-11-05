@@ -116,11 +116,55 @@ function policyData(rows) {
 		.filter(r => r.key !== '' || r.servers.length);
 }
 
+// serve 表格行 → 提交给 tailscale.set 的数组；空行忽略，格式错误时抛出说明
+const SERVE_HTTP = /^http:\/\/(\d{1,3}(\.\d{1,3}){3}|\[[0-9A-Fa-f:.]+\]):(\d{1,5})\/?$/;
+const SERVE_UNIX = /^unix:(\/\/)?\S+$/;
+function serveData(rows, strict) {
+	const out = [], seen = {};
+	rows.forEach(r => {
+		const p = String(r.port || '').trim(), t = String(r.target || '').trim();
+		if (!p && !t) return;
+		const n = Number(p), m = SERVE_HTTP.exec(t);
+		if (strict) {
+			if (!/^\d+$/.test(p) || n < 1 || n > 65535) throw new Error('端口转发：端口须为 1-65535：' + (p || '（空）'));
+			if (seen[n]) throw new Error('端口转发：端口重复：' + n);
+			if (!(m && Number(m[3]) >= 1 && Number(m[3]) <= 65535) && !SERVE_UNIX.test(t))
+				throw new Error('端口转发：目标须为 http://IP:端口 或 unix:路径：' + (t || '（空）'));
+		}
+		seen[n] = true;
+		out.push({ port: n, target: m ? t.replace(/\/$/, '') : t });
+	});
+	return out;
+}
+
+// 内核 /tailscale 接口：启动后端并等待登录结果（auth key 自动登录，或返回 authURL）
+function tsKernelLogin(name, wait) {
+	return api.request('POST', '/tailscale/' + encodeURIComponent(name) + '/login?wait=' + wait, undefined, { timeout: (wait + 10) * 1000 });
+}
+
+function tsStateLabel(live, st, t) {
+	const tag = (cls, text) => E('span', { 'class': cls }, text);
+	if (live) {
+		switch (live.state) {
+		case 'Running': return tag('mh-ok', '在线');
+		case 'Starting': return tag('mh-warn', '连接中…');
+		case 'NeedsMachineAuth': return tag('mh-warn', '等待管理员在 Tailscale 后台批准这台设备');
+		case 'NeedsLogin': return tag('mh-warn', t['auth-key'] ? '需要登录（auth key 可能无效或已过期）' : '需要登录');
+		case 'NotStarted':
+			return st.logged_in ? tag('mh-warn', '已登录，未启动（有流量或点「立即连接」时启动）')
+				: tag('mh-warn', t['auth-key'] ? '未登录（已填写 auth key，点「立即连接」或有流量时登录）' : '未登录');
+		default: return tag('mh-warn', live.state || '未知');
+		}
+	}
+	if (st.logged_in) return tag('mh-ok', '已登录');
+	return tag('mh-warn', t['auth-key'] ? '未登录（已填写 auth key，服务启动并有流量时自动登录）' : '未登录');
+}
+
 const TABS = [ [ 'ebpf', '透明代理' ], [ 'basic', '基础' ], [ 'dns', 'DNS' ], [ 'tailscale', 'Tailscale' ] ];
 const DNS_MODES = [ [ 'hijack', 'hijack：接管 DNS 查询' ], [ 'respect_policy', 'respect_policy：按规则决定是否接管' ], [ 'off', 'off：不处理 DNS' ] ];
 
 return view.extend({
-	SPECS, toForm, fromForm, changed, changedFields, policyRows, policyData,
+	SPECS, toForm, fromForm, changed, changedFields, policyRows, policyData, serveData,
 
 	handleSave: null,
 	handleSaveApply: null,
@@ -161,8 +205,10 @@ return view.extend({
 			api.rpc.sections([ 'ebpf', 'basic', 'dns', 'tailscale' ]),
 			api.rpc.interfaces().catch(() => null),
 			api.rpc.devices().catch(() => null),
-			api.rpc.tailscale().catch(() => null)
-		]).then(([ s, ifs, devs, ts ]) => {
+			api.rpc.tailscale().catch(() => null),
+			// 内核运行时的实时状态（旧内核没有这个接口，或服务未运行时为 null）
+			api.get('/tailscale', { timeout: 6000 }).catch(() => null)
+		]).then(([ s, ifs, devs, ts, live ]) => {
 			if (!s || !s.ok) throw new Error((s && s.error) || '读取失败');
 			if (s.parse_error) {
 				this.body.replaceChildren(mui.card('', mui.empty(s.parse_error, E('a', { href: L.url('admin/services/mihomo/config') }, '打开配置文件页'))));
@@ -173,6 +219,7 @@ return view.extend({
 			this.ifs = (ifs && ifs.ok && ifs.list) || [];
 			this.devs = (devs && devs.ok && devs.list) || [];
 			this.tsStatus = (ts && ts.ok && ts.list) || [];
+			this.tsLive = (live && Array.isArray(live.tailscale)) ? live.tailscale : null;
 			this.forms = {};
 			return Promise.all([ this.buildEbpf(), this.buildBasic(), this.buildDns(), this.buildTailscale() ]).then(() => {
 				this.body.replaceChildren(...TABS.map(([ id ]) => this.panels[id]));
@@ -331,6 +378,23 @@ return view.extend({
 			o = s.taboption('geo', form.Value, 'geox-url__geoip', 'GeoIP');
 			o = s.taboption('geo', form.Value, 'geox-url__geosite', 'GeoSite');
 			o = s.taboption('geo', form.Value, 'geox-url__mmdb', 'MMDB');
+		}).then(() => {
+			const btn = mui.btn('更新面板', () => this.upgradeDashboard(btn), 'cbi-button-action');
+			panel.appendChild(mui.card('面板', [
+				E('p', { 'class': 'mh-note' }, '让 mihomo 从「面板下载地址」重新下载面板（默认 zashboard）到面板目录，下载完成后刷新面板页面即可。需要服务正在运行。'),
+				E('div', { 'class': 'mh-toolbar' }, btn)
+			]));
+		});
+	},
+
+	upgradeDashboard(btn) {
+		if (!this.sec.basic || !this.sec.basic['external-ui']) return mui.notify('请先填写面板目录（external-ui）并保存', 'error');
+		btn.disabled = true;
+		btn.textContent = '下载中…';
+		return api.request('POST', '/upgrade/ui', undefined, { timeout: 120000 }).then(() => mui.notify('面板已更新，刷新面板页面即可看到新版本'),
+			e => mui.notify('更新面板失败：' + e.message, 'error')).then(() => {
+			btn.disabled = false;
+			btn.textContent = '更新面板';
 		});
 	},
 
@@ -415,24 +479,33 @@ return view.extend({
 		}
 		return Promise.all(list.map((t, i) => {
 			const st = this.tsStatus.find(x => x.name === t.name) || {};
+			const live = (this.tsLive || []).find(x => x.name === t.name) || null;
+			const self = (live && live.self) || {};
 			const box = E('div', {});
-			const actions = [
-				st.logged_in
-					? mui.btn('退出登录', () => this.tsLogout(t.name), 'cbi-button-negative')
-					: mui.btn('网页登录', () => this.tsLogin(t.name), 'cbi-button-action'),
-				' ', mui.btn('删除', () => this.tsDelete(t.name), 'cbi-button-remove')
-			];
+			const running = live ? live.state === 'Running' : false;
+			const loggedIn = running || !!st.logged_in;
+			const actions = [];
+			if (loggedIn) actions.push(mui.btn('退出登录', () => this.tsLogout(t.name), 'cbi-button-negative'));
+			if (!running && live && t['auth-key']) actions.push(mui.btn('立即连接', () => this.tsConnect(t.name), 'cbi-button-action'), ' ');
+			if (!loggedIn) actions.push(mui.btn('网页登录', () => this.tsLogin(t.name), 'cbi-button-action'));
+			actions.push(' ', mui.btn('删除', () => this.tsDelete(t.name), 'cbi-button-remove'));
+			const serve = this.serveTable(t.serve);
 			panel.appendChild(mui.card('Tailscale：' + t.name, [
 				E('div', { 'class': 'mh-ts-status' }, [
-					mui.row('登录状态', st.logged_in ? E('span', { 'class': 'mh-ok' }, '已登录')
-						: E('span', { 'class': 'mh-warn' }, t['auth-key'] ? '未登录（已填写 auth key，服务启动并有流量时自动登录）' : '未登录')),
-					st.login ? mui.row('账号', st.login) : '',
-					st.tailnet ? mui.row('Tailnet', st.tailnet) : '',
-					st.magic_dns ? mui.row('MagicDNS', st.magic_dns) : '',
+					mui.row('状态', tsStateLabel(live, st, t)),
+					live && live.error ? mui.row('错误', E('span', { 'class': 'mh-warn', style: 'word-break:break-all' }, live.error)) : '',
+					(live && live.login) || st.login ? mui.row('账号', (live && live.login) || st.login) : '',
+					(live && live.tailnet) || st.tailnet ? mui.row('Tailnet', (live && live.tailnet) || st.tailnet) : '',
+					self.dnsName ? mui.row('域名', self.dnsName.replace(/\.$/, '')) : (st.magic_dns ? mui.row('MagicDNS', st.magic_dns) : ''),
+					Array.isArray(self.ips) && self.ips.length ? mui.row('Tailnet 地址', self.ips.join('  ')) : '',
 					mui.row('状态目录', st.state_dir || '-')
 				]),
 				E('div', { 'class': 'mh-toolbar', style: 'margin:8px 0' }, actions),
 				box,
+				E('h4', { style: 'margin:12px 0 4px' }, '端口转发（serve）'),
+				E('p', { 'class': 'mh-note' }, 'Tailnet 里的设备访问 ' + (self.dnsName ? self.dnsName.replace(/\.$/, '') : '这台设备的 Tailnet 地址') +
+					':端口 时，转发到路由器上的 HTTP 服务，例如 LuCI（http://127.0.0.1:80）。只转发 HTTP，保存后重启服务生效。'),
+				serve.root,
 				E('p', { 'class': 'mh-note' }, '名称不能在这里修改：规则、策略组与 ts://' + t.name + ' 都按名称引用它。已登录时修改 auth-key 不会切换账号，要换账号请先退出登录。')
 			], { tools: i === 0 ? [ mui.btn('添加', () => this.tsAdd(), 'mh-btn-sm cbi-button-add') ] : null }));
 			return this.mount(box, 'ts' + i, 'tailscale', 'ts' + i, t, s => {
@@ -448,8 +521,48 @@ return view.extend({
 				o.datatype = 'ipaddr';
 				o = s.option(form.Value, 'listen-port', 'UDP 监听端口', '留空或 0 表示随机端口');
 				o.datatype = 'range(0,65535)';
-			}, { name: t.name });
+			}, { name: t.name, serve: serve, serveBefore: serveData(serve.rows) });
 		}));
+	},
+
+	// serve 列表：端口 → http://IP:端口 或 unix:套接字
+	serveTable(list) {
+		const rows = (Array.isArray(list) ? list : []).map(e => ({ port: String((e && e.port) || ''), target: (e && e.target) || '' }));
+		const tbody = E('tbody', {});
+		const draw = () => {
+			tbody.replaceChildren(...rows.map((r, i) => {
+				const port = E('input', { 'class': 'cbi-input-text', type: 'number', min: 1, max: 65535, value: r.port, placeholder: '8080', style: 'width:7em' });
+				const target = E('input', { 'class': 'cbi-input-text', value: r.target, placeholder: 'http://127.0.0.1:80', style: 'width:100%' });
+				port.addEventListener('input', () => { r.port = port.value; });
+				target.addEventListener('input', () => { r.target = target.value; });
+				return E('tr', {}, [
+					E('td', {}, port), E('td', {}, target),
+					E('td', { 'class': 'mh-actions' }, E('button', { 'class': 'mh-x', title: '删除', 'click': () => { rows.splice(i, 1); draw(); } }, '✕'))
+				]);
+			}));
+			if (!rows.length) tbody.appendChild(E('tr', {}, E('td', { colspan: 3 }, mui.empty('没有端口转发'))));
+		};
+		draw();
+		return {
+			rows: rows,
+			root: E('div', {}, [
+				E('div', { 'class': 'mh-scroll-x' }, E('table', { 'class': 'mh-table' }, [
+					E('thead', {}, E('tr', {}, [ E('th', {}, 'Tailnet 端口'), E('th', {}, '转发到'), E('th', {}, '') ])), tbody
+				])),
+				E('div', { 'class': 'mh-toolbar', style: 'margin-top:8px' }, mui.btn('添加转发', () => { rows.push({ port: '', target: '' }); draw(); }, 'mh-btn-sm cbi-button-add'))
+			])
+		};
+	},
+
+	// 有 auth key 时让内核立即登录（不必等第一条流量）
+	tsConnect(name) {
+		mui.notify('正在连接 ' + name + '…');
+		return tsKernelLogin(name, 25).then(st => {
+			if (st.state === 'Running') mui.notify('Tailscale 已连接');
+			else if (st.authURL) mui.notify('auth key 无效或已过期，请改用网页登录', 'error');
+			else mui.notify('还没有连上（' + (st.state || '未知状态') + '）' + (st.error ? '：' + st.error : ''), 'error');
+			return this.reload();
+		}, e => mui.notify(e.status === 404 ? '当前内核不支持，请更新内核或等有流量时自动登录' : '连接失败：' + e.message, 'error'));
 	},
 
 	// 新增：写入出站与 Tailnet 规则（配置任务会在服务运行时重启），不填 auth key 时接着网页登录
@@ -498,7 +611,9 @@ return view.extend({
 	tsLogout(name) {
 		mui.confirm('退出登录', '删除 ' + name + ' 的登录状态并重启服务，设备会从 Tailnet 中离线，之后需要重新登录。', '退出登录', true).then(yes => {
 			if (!yes) return;
-			return api.rpc.tailscaleLogout(name).then(r => {
+			// 先让内核注销节点（Tailnet 后台里会立即消失），旧内核或服务未运行时忽略
+			const kernel = api.request('POST', '/tailscale/' + encodeURIComponent(name) + '/logout', undefined, { timeout: 15000 }).catch(() => null);
+			return kernel.then(() => api.rpc.tailscaleLogout(name)).then(r => {
 				if (!r || !r.ok) throw new Error((r && r.error) || '退出登录失败');
 				mui.notify('已退出登录');
 				return this.reload();
@@ -527,37 +642,56 @@ return view.extend({
 			msg.textContent = text;
 			retry.replaceChildren(mui.btn('重启服务后重新获取', () => { close(); this.tsLogin(name, true); }, 'cbi-button-action'));
 		};
-		const poll = () => api.rpc.tailscale().then(r => {
-			const st = ((r && r.ok && r.list) || []).find(x => x.name === name);
-			if (st && st.logged_in) {
-				close();
-				ui.hideModal();
-				mui.notify('Tailscale 已登录' + (st.login ? '：' + st.login : ''));
-				return this.reload();
-			}
+		const done = login => {
+			close();
+			ui.hideModal();
+			mui.notify('Tailscale 已登录' + (login ? '：' + login : ''));
+			return this.reload();
+		};
+		// 优先看内核实时状态，旧内核退回到读状态文件
+		const poll = () => api.get('/tailscale/' + encodeURIComponent(name), { timeout: 8000 }).then(st => {
+			if (st && st.state === 'Running') return done(st.login);
 			later(poll, 3000);
-		}, () => later(poll, 3000));
+		}, () => api.rpc.tailscale().then(r => {
+			const st = ((r && r.ok && r.list) || []).find(x => x.name === name);
+			if (st && st.logged_in) return done(st.login);
+			later(poll, 3000);
+		})).catch(() => later(poll, 3000));
 		const copy = () => (navigator.clipboard && window.isSecureContext)
 			? navigator.clipboard.writeText(url).then(() => mui.notify('已复制'), () => mui.notify('复制失败，请手动复制', 'error'))
 			: mui.notify('当前页面不能使用剪贴板，请手动复制链接', 'error');
+		const show = u => {
+			url = u;
+			if (stream) stream.close();
+			msg.textContent = '在新标签页里登录 Tailscale 账号并授权这台设备，完成后这里会自动更新。';
+			link.replaceChildren(
+				E('p', {}, E('a', { href: url, target: '_blank', rel: 'noopener noreferrer', style: 'word-break:break-all' }, url)),
+				E('div', { 'class': 'mh-toolbar' }, [
+					mui.btn('在新标签页打开', () => window.open(url, '_blank', 'noopener'), 'cbi-button-action'), ' ',
+					mui.btn('复制链接', copy)
+				]));
+			retry.replaceChildren();
+			later(poll, 3000);
+		};
+		// 新内核：/tailscale/NAME/login 直接返回登录链接；旧内核（404）退回到从日志里抓链接
+		const viaKernel = () => tsKernelLogin(name, 20).then(st => {
+			if (closed) return;
+			if (st && st.state === 'Running') return done(st.login);
+			if (st && st.authURL) return show(st.authURL);
+			fail('没有拿到登录链接（' + ((st && st.state) || '未知状态') + '）' + (st && st.error ? '：' + st.error : ''));
+		}, e => {
+			if (closed) return;
+			if (e.status === 404) return begin();
+			fail('获取登录链接失败：' + e.message);
+		});
 		const prefix = '[Tailscale](' + name + ') ';
 		const begin = () => {
 			stream = api.stream('/logs?level=info', d => {
 				const p = d && d.payload;
 				if (closed || typeof p !== 'string' || p.indexOf(prefix) !== 0) return;
 				const m = /go to: (https?:\/\/[^\s"]+)/.exec(p);
-				if (m && !url) {
-					url = m[1];
-					msg.textContent = '在新标签页里登录 Tailscale 账号并授权这台设备，完成后这里会自动更新。';
-					link.replaceChildren(
-						E('p', {}, E('a', { href: url, target: '_blank', rel: 'noopener noreferrer', style: 'word-break:break-all' }, url)),
-						E('div', { 'class': 'mh-toolbar' }, [
-							mui.btn('在新标签页打开', () => window.open(url, '_blank', 'noopener'), 'cbi-button-action'), ' ',
-							mui.btn('复制链接', copy)
-						]));
-					retry.replaceChildren();
-					later(poll, 3000);
-				} else if (/AuthLoop: state is Running/.test(p)) poll();
+				if (m && !url) show(m[1]);
+				else if (/AuthLoop: state is Running/.test(p)) poll();
 			});
 			// 订阅建立后再唤醒 tsnet：它只在第一次连接时启动，登录链接只输出一次
 			later(() => api.get('/proxies/' + encodeURIComponent(name) + '/delay?url=' + encodeURIComponent('http://100.100.100.100') + '&timeout=8000',
@@ -574,7 +708,7 @@ return view.extend({
 			if (closed) return;
 			if (r && r.ok === false) return fail('服务启动失败：' + (r.error || ''));
 			msg.textContent = '正在获取登录链接…';
-			return api.controller(true).then(c => (c && c.base) ? begin() : fail('浏览器无法连接控制器：' + ((c && c.reason) || '')));
+			return api.controller(true).then(c => (c && c.base) ? viaKernel() : fail('浏览器无法连接控制器：' + ((c && c.reason) || '')));
 		}, e => fail(e.message));
 	},
 
@@ -595,6 +729,13 @@ return view.extend({
 					data['nameserver-policy'] = after;
 				}
 			}
+			if (f.kind === 'tailscale') {
+				const after = serveData(f.extra.serve.rows, true);
+				if (changed(f.extra.serveBefore, after)) {
+					data = data || {};
+					data.serve = after;
+				}
+			}
 			if (!data) return;
 			if (key === 'ebpf') ops.push({ op: 'ebpf.set', data: data });
 			else if (key === 'basic') {
@@ -609,7 +750,8 @@ return view.extend({
 	save() {
 		const maps = Object.keys(this.forms).map(k => this.forms[k].m);
 		Promise.all(maps.map(m => m.parse())).then(() => {
-			const c = this.collect();
+			let c;
+			try { c = this.collect(); } catch (e) { return mui.notify(e.message, 'error'); }
 			if (!c.ops.length) return mui.notify('没有修改');
 			return mui.runJob(api.rpc.patch(c.ops, this.rev)).then(s => {
 				if (s.state === 'done' && c.ctlChanged) api.controller(true);
