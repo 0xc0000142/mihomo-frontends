@@ -34,13 +34,15 @@ kernel_at_least() {
   [ "$major" -gt "$1" ] || { [ "$major" -eq "$1" ] && [ "$minor" -ge "$2" ]; }
 }
 
+# Android 使用策略路由，默认路由分散在多张表里；用 route get 取实际出口。
+# 只有源地址为全局单播（2000::/3）时才认为有可用的 IPv6 出口。
 ipv6_upstream() {
-  tool timeout 3 ip -6 route show default 2>/dev/null | grep -q . && return 0
-  tool timeout 3 ip -6 route show table all 2>/dev/null | grep -q '^default '
+  source=$(tool timeout 3 ip -6 route get 2001:4860:4860::8888 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="src"){print $(i+1); exit}}')
+  case "$source" in [23]???:*|[23]??:*|[23]?:*|[23]:*) return 0 ;; *) return 1 ;; esac
 }
 
 ipv4_upstream() {
-  tool timeout 3 ip -4 route show table all 2>/dev/null | awk '$1=="default"{for(i=1;i<NF;i++) if($i=="dev"){print $(i+1); exit}}'
+  tool timeout 3 ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="dev"){print $(i+1); exit}}'
 }
 
 mem_mb() {

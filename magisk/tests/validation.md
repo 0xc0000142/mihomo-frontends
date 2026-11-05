@@ -64,3 +64,28 @@ The frontend suite exercises the actual application JavaScript with mocked DOM a
 - `avd-tethering.sh` is specific to this disposable AVD and `fixtures/android.yaml`. It temporarily creates a namespace, veth, routes, forwarding and iptables rules to simulate a downstream client, and cleans up its own network state. The production module does not install these iptables rules. Do not run the script on a production phone or with unrelated routing table 109 rules.
 - Settings support a single block-style eBPF listener. Unsupported YAML is rejected explicitly; see `backend-contract.md`.
 - The AVD is left with the module installed but service/autostart disabled. A minimal DIRECT smoke-test configuration remains, not a subscription configuration.
+
+## v1.2.0 on HyperOS AVD (2026-11-05)
+
+Device: `emulator-5580` HyperOS 4 / Android 17, kernel 6.6.66 (BTF, cgroup2), KernelSU 32601, core `alpha-smart-e272b9d-ebpf`. Data was backed up to `HyperOS-AVD/tmp/mihomo-test/backup-before-v1.2.0.tgz` and the original `config.yaml`, service state and Manager settings were restored afterwards.
+
+- `ksud module install` of the v1.2.0 zip keeps the existing config; `customize.sh` only appends missing settings keys (existing `autostart=0`, `tethering=1` kept).
+- `tests/device-check.sh` (root shell): `host.sh probe`, a 288000-byte stage round trip in 96000-byte chunks, `fetch` of a 143 KB GitHub config, rejection of `file://`.
+- Real WebView checks went through CDP (`tests/cdp-eval.mjs`, with Manager's WebView debugging enabled temporarily via `tests/avd-webdebug.sh`):
+  - `tests/device-flow.js`: MetaCubeX example config → analyze (54 proxies, 20 listeners) → optimize → idempotent re-run with no required changes. The example itself fails `mihomo -t` because of placeholder values (`server: [YOUR_SERVER_IP]`) and `/path/to/ui`, so that pass is not a validation pass.
+  - `tests/device-flow-template.js`: subscription → built-in template → optimize, and a router-style config (tproxy, TUN, absolute `/etc/openclash` paths, `PROCESS-NAME`) → optimize. Both pass `mihomo -t` on the device.
+  - Applying the optimized template with restart started the core; `/ebpf` reported a hybrid inbound (cgroup + packet_rewrite) and the home page showed live traffic.
+- UI driven via `tests/avd-ui.sh` (KernelSU WebUIActivity is not exported; launched from the Manager module list with the temporary `skiagl` workaround):
+  - Wizard steps 1–3 with a real host probe and a real config URL.
+  - Home, proxies (32 groups in config order, with delays), settings and the app picker with real packages and icons.
+  - System back closes sheets, then returns to the previous page, and from home exits the WebUI.
+
+Bugs found and fixed on device:
+- Lists did not scroll by touch. WebView took the pan and sent `pointercancel`; fixed with `touch-action: none` on the Compose host.
+- `importUrl` always failed. KernelSU runs commands in a persistent libsu shell, so a top-level `exit` reports failure; the command now runs in a subshell.
+- Upstream detection found `dummy0` and IPv6 detection found a link-local route. Android uses per-network routing tables; detection now uses `ip route get`, and IPv6 requires a global source address.
+- Imported configs with absolute paths were rejected by the core's SAFE_PATHS check. A required optimize step now rewrites them to relative paths.
+- A URL pasted into the YAML box is now treated as a subscription.
+- The overview no longer blanks values during refresh, and long core version strings are shortened.
+
+Not covered: real hotspot/USB clients through the shared data plane, IPv6-capable networks, other OEM WebViews, and the wizard's apply step driven by touch (the same calls were exercised through CDP).

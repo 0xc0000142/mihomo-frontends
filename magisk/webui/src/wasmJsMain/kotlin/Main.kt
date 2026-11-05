@@ -79,15 +79,6 @@ private external fun ready()
 @JsFun("(message) => { const text = document.getElementById('loading-message'); if (text) text.textContent = message; const retry = document.getElementById('reload'); if (retry) retry.hidden = false; }")
 private external fun fontFailure(message: String)
 
-/** 系统返回键：KernelSU WebUI 会把返回转成 history.back，这里压一层历史记录并在 popstate 时回调。 */
-@JsFun("""(callback) => {
-    const handler = () => { history.pushState({ mihomo: true }, ''); callback(); };
-    history.pushState({ mihomo: true }, '');
-    window.addEventListener('popstate', handler);
-    return () => window.removeEventListener('popstate', handler);
-}""")
-private external fun onBackPressed(callback: () -> Unit): () -> Unit
-
 suspend fun request(operation: String, payload: JsonObject = json()): JsonObject {
     val response = suspendCancellableCoroutine<String> { continuation ->
         bridgeRequest(operation, payload.toString(),
@@ -211,10 +202,10 @@ private fun MihomoApp() {
         }
     }
     LaunchedEffect(Unit) { ready() }
-    DisposableEffect(Unit) {
-        val dispose = onBackPressed { if (phase == "app") navigator.back() }
-        onDispose { dispose() }
-    }
+    LaunchedEffect(Unit) { BackDispatcher.install() }
+    BackSync()
+    // 子页面或非首页标签时，返回键先回上一级；在首页且无弹窗时交给 WebUI 关闭。
+    BackHandler(enabled = phase == "app" && (navigator.stack.isNotEmpty() || navigator.tab != "home")) { navigator.back() }
     Box(Modifier.fillMaxSize().background(MiuixTheme.colorScheme.surface)) {
         when (phase) {
             "checking" -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {

@@ -46,7 +46,6 @@ import top.yukonga.miuix.kmp.icon.extended.Refresh
 import top.yukonga.miuix.kmp.icon.extended.Search
 import top.yukonga.miuix.kmp.preference.CheckboxPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme
-import top.yukonga.miuix.kmp.window.WindowBottomSheet
 
 internal val settingsDefaultInterfaces = listOf("ap0", "wlan1", "rndis0", "usb0", "bt-pan")
 private val settingsInterfacePattern = Regex("[A-Za-z0-9_][A-Za-z0-9_.-]{0,14}")
@@ -516,7 +515,7 @@ fun SettingsPage(onNavigate: (String) -> Unit) {
 @Composable
 private fun SettingsInterfaceSheet(state: SettingsState) {
     val draft = state.draft
-    WindowBottomSheet(show = state.showInterfaces, title = "共享网卡", onDismissRequest = { state.showInterfaces = false }) {
+    Sheet(show = state.showInterfaces, title = "共享网卡", onDismissRequest = { state.showInterfaces = false }) {
         Column(Modifier.fillMaxWidth().padding(bottom = 16.dp)) {
             if (state.interfacesLoading) Banner("正在探测网卡…", BannerKind.Progress)
             state.interfaceError?.let { Banner(it, BannerKind.Error) }
@@ -544,7 +543,7 @@ private fun SettingsInterfaceSheet(state: SettingsState) {
 @Composable
 private fun SettingsSsidSheet(state: SettingsState, onAdd: () -> Unit) {
     val draft = state.draft
-    WindowBottomSheet(show = state.showSsids, title = "Wi-Fi 列表", onDismissRequest = { state.showSsids = false }) {
+    Sheet(show = state.showSsids, title = "Wi-Fi 列表", onDismissRequest = { state.showSsids = false }) {
         Column(Modifier.fillMaxWidth().padding(bottom = 16.dp)) {
             val ssids = draft?.ssids?.settingsLines()?.split('\n').orEmpty()
             Card(colors = CardDefaults.defaultColors(color = MiuixTheme.colorScheme.secondaryContainer)) {
@@ -570,7 +569,7 @@ private fun SettingsSsidSheet(state: SettingsState, onAdd: () -> Unit) {
 
 @Composable
 private fun SettingsAppPicker(state: SettingsState) {
-    WindowBottomSheet(
+    Sheet(
         show = state.pickerOpen,
         title = "不走代理的应用",
         onDismissRequest = { state.closePicker(false) },

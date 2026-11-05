@@ -179,7 +179,17 @@ internal object SetupState {
     }
 
     /** 读取来源：链接自动识别完整配置与节点订阅。 */
-    fun loadSource() = launch("读取配置…") {
+    fun loadSource() {
+        // 粘贴框里只有一个链接时按订阅处理，避免误报 YAML 错误
+        if (source == SetupSource.Paste && Regex("^https?://\\S+$").matches(pasted.trim())) {
+            url = pasted.trim()
+            pasted = ""
+            source = SetupSource.Subscription
+        }
+        readSource()
+    }
+
+    private fun readSource() = launch("读取配置…") {
         imported = null
         importedSummary = null
         detected = ""
@@ -214,6 +224,7 @@ internal object SetupState {
             }
             SetupSource.Paste -> {
                 require(pasted.isNotBlank()) { "请粘贴配置内容" }
+
                 val analysis = request("configAnalyze", json("content" to pasted))
                 when (analysis.string("kind")) {
                     "subscription" -> error("粘贴的是节点链接，请改用「订阅链接」导入")
@@ -326,6 +337,9 @@ fun SetupWizard(firstRun: Boolean, onExit: () -> Unit) {
     val state = SetupState
     LaunchedEffect(Unit) { state.start() }
     val titles = listOf("检测本机", "配置来源", "本机优化", "运行偏好", "应用")
+    BackHandler(enabled = state.step in 1..3 || (!firstRun && !state.finished && state.busy.isEmpty())) {
+        if (state.step in 1..3) { state.step--; state.error = "" } else onExit()
+    }
     Box(Modifier.fillMaxSize()) {
         Page(
             title = if (firstRun && state.step == 0) "欢迎使用" else titles[state.step],
@@ -419,7 +433,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.setupHost() {
         val core = state.core
         InfoRow("mihomo 内核", when {
             core == null -> "—"
-            state.coreInstalled -> core.string("version").ifBlank { "已安装" }
+            state.coreInstalled -> shortVersion(core.string("version")).ifBlank { "已安装" }
             else -> "未安装"
         }, valueColor = if (state.coreInstalled) Tone.success else Tone.warning)
         if (!state.coreInstalled) {

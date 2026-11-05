@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -27,9 +28,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -47,6 +45,9 @@ import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Delete
+import top.yukonga.miuix.kmp.icon.extended.Info
+import top.yukonga.miuix.kmp.icon.extended.Ok
+import top.yukonga.miuix.kmp.icon.extended.Report
 import top.yukonga.miuix.kmp.icon.extended.Link
 import top.yukonga.miuix.kmp.icon.extended.Notes
 import top.yukonga.miuix.kmp.icon.extended.Pause
@@ -56,7 +57,6 @@ import top.yukonga.miuix.kmp.icon.extended.Settings
 import top.yukonga.miuix.kmp.icon.extended.Tune
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.utils.PressFeedbackType
-import top.yukonga.miuix.kmp.window.WindowBottomSheet
 
 /** 首页：状态卡 + 流量统计 + 运行信息 + 快捷入口。 */
 @Composable
@@ -94,7 +94,7 @@ fun HomePage(onNavigate: (String) -> Unit) {
             ArrowRow("内核版本", value = when {
                 core == null -> "—"
                 core.boolean("installed") != true -> "未安装"
-                else -> core.string("version").ifBlank { "未知" }
+                else -> shortVersion(core.string("version")).ifBlank { "未知" }
             }) { onNavigate("core") }
             InfoRow("内存占用", state.memoryInUse?.let { formatBytes(it) }
                 ?: state.status?.string("rss_kb")?.toDoubleOrNull()?.let { formatBytes(it * 1024) } ?: "—")
@@ -113,69 +113,84 @@ fun HomePage(onNavigate: (String) -> Unit) {
     }
 }
 
+/**
+ * 状态卡：参照 KernelSU 管理器主页——整卡按状态着色，标题 + 两行说明，
+ * 右下角放一枚溢出卡片边缘的大号半透明状态图标；运行中时下方追加操作按钮。
+ */
 @Composable
 private fun HomeStatusCard(onNavigate: (String) -> Unit) {
     val state = LiveOverview
     val running = state.running
     val coreMissing = state.core?.boolean("installed") == false
-    val tint = when {
-        running == true -> Tone.success
-        running == null && state.statusError.isNotEmpty() -> Tone.danger
-        state.paused || coreMissing -> Tone.warning
-        else -> Tone.muted
+    val dark = MiuixTheme.colorScheme.background.red < 0.5f
+    val (container, accent) = when {
+        running == true -> if (dark) Color(0xFF1B3A26) to Color(0xFF4ADE80) else Color(0xFFDFFAE4) to Color(0xFF36D167)
+        running == null && state.statusError.isNotEmpty() -> if (dark) Color(0xFF3D1E1E) to Color(0xFFF87171) else Color(0xFFFFE4E4) to Color(0xFFF26B6B)
+        state.paused || coreMissing -> if (dark) Color(0xFF3B2F17) to Color(0xFFFBBF24) else Color(0xFFFFF1D6) to Color(0xFFF5A524)
+        else -> MiuixTheme.colorScheme.surfaceContainer to Tone.muted
     }
     val title = when {
         running == null && state.statusError.isEmpty() -> "读取中"
         running == null -> "状态未知"
-        running -> "运行中"
+        running -> "工作中"
         state.paused -> "已暂停"
         coreMissing -> "未安装内核"
-        else -> "已停止"
+        else -> "未运行"
     }
-    val detail = when {
+    val line1 = when {
+        running == true -> "内核：" + shortVersion(state.core?.string("version")?.ifBlank { null } ?: state.controllerVersion.ifBlank { "—" })
+        coreMissing -> "点击下载 mihomo 内核"
+        state.paused -> "当前 Wi-Fi 不在允许范围内"
+        running == null -> if (state.statusError.isEmpty()) "正在检查服务状态" else "无法读取服务状态"
+        else -> "点击卡片启动透明代理"
+    }
+    val line2 = when {
         !liveIdle -> liveActivity
-        running == null && state.statusError.isEmpty() -> "正在检查服务状态"
-        running == null -> "无法读取服务状态"
-        running -> state.controllerVersion.ifBlank { "透明代理已接管本机流量" }
-        state.paused -> "当前 Wi-Fi 不在允许范围内，切换网络后自动恢复"
-        coreMissing -> "点击此处下载内核"
-        else -> "点击右侧按钮启动"
+        running == true -> "eBPF 透明代理" + if (state.policy?.boolean("tethering") == true) " · 共享已开启" else ""
+        state.paused -> "切换到允许的网络后自动恢复"
+        else -> ""
     }
+    val icon = when {
+        running == true -> MiuixIcons.Regular.Ok
+        state.paused -> MiuixIcons.Regular.Pause
+        coreMissing -> MiuixIcons.Regular.Info
+        running == null && state.statusError.isNotEmpty() -> MiuixIcons.Regular.Report
+        else -> MiuixIcons.Regular.Play
+    }
+    val clickable = liveIdle && (coreMissing || (running == false && !state.paused))
     Card(
         modifier = Modifier.padding(horizontal = 12.dp).padding(bottom = 12.dp).fillMaxWidth(),
-        insideMargin = PaddingValues(20.dp),
-        pressFeedbackType = if (coreMissing) PressFeedbackType.Sink else PressFeedbackType.None,
-        onClick = if (coreMissing) ({ onNavigate("core") }) else null,
+        insideMargin = PaddingValues(0.dp),
+        colors = CardDefaults.defaultColors(color = container),
+        pressFeedbackType = if (clickable) PressFeedbackType.Sink else PressFeedbackType.None,
+        onClick = if (clickable) ({ if (coreMissing) onNavigate("core") else state.service("start") }) else null,
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Box(Modifier.size(10.dp).clip(CircleShape).background(tint))
-                    Text(title, fontSize = 24.sp, fontWeight = FontWeight.Bold, color = MiuixTheme.colorScheme.onSurface)
-                }
-                Text(detail, fontSize = 13.sp, lineHeight = 18.sp, color = Tone.muted, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            }
-            val canAct = liveIdle && running != null && !coreMissing
-            val stop = running == true || state.paused
+        Box(Modifier.fillMaxWidth().heightIn(min = 132.dp).clip(RoundedCornerShape(16.dp))) {
+            // 与 KernelSU 主页一致：右下角大号圆形徽标，部分越出卡片边缘
             Box(
-                Modifier.size(56.dp).clip(CircleShape)
-                    .background(if (running == true) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.secondaryContainer)
-                    .clickable(enabled = canAct, role = Role.Button) { state.service(if (stop) "stop" else "start") }
-                    .semantics { contentDescription = if (stop) "停止服务" else "启动服务" },
+                Modifier.align(Alignment.BottomEnd).offset(x = 26.dp, y = 30.dp).size(120.dp)
+                    .clip(CircleShape).background(accent.copy(alpha = 0.18f)).padding(14.dp)
+                    .clip(CircleShape).background(accent),
                 contentAlignment = Alignment.Center,
             ) {
-                if (!liveIdle) CircularProgressIndicator(size = 22.dp, strokeWidth = 2.dp)
-                else Icon(if (stop) MiuixIcons.Regular.Pause else MiuixIcons.Regular.Play, null,
-                    tint = if (running == true) MiuixTheme.colorScheme.onPrimary else MiuixTheme.colorScheme.onSecondaryContainer,
-                    modifier = Modifier.size(26.dp))
+                Icon(icon, contentDescription = null, tint = container, modifier = Modifier.size(52.dp))
+            }
+            Column(Modifier.padding(20.dp).padding(end = 72.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(title, fontSize = 24.sp, fontWeight = FontWeight.Bold, color = MiuixTheme.colorScheme.onSurface)
+                Text(line1, fontSize = 14.sp, color = MiuixTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (line2.isNotEmpty()) Text(line2, fontSize = 14.sp, color = MiuixTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (!liveIdle) CircularProgressIndicator(size = 16.dp, strokeWidth = 2.dp, modifier = Modifier.padding(top = 8.dp))
             }
         }
-        if (running == true) {
-            Spacer(Modifier.height(16.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                TextButton("重启", onClick = { state.service("restart") }, enabled = liveIdle, modifier = Modifier.weight(1f))
-                TextButton("切换节点", onClick = { onNavigate("proxies") }, modifier = Modifier.weight(1f))
-            }
+    }
+    if (running == true || state.paused) {
+        Row(Modifier.padding(horizontal = 12.dp).padding(bottom = 12.dp).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            TextButton("停止", onClick = { state.service("stop") }, enabled = liveIdle, modifier = Modifier.weight(1f))
+            TextButton("重启", onClick = { state.service("restart") }, enabled = liveIdle && running == true, modifier = Modifier.weight(1f))
+            TextButton("切换节点", onClick = { onNavigate("proxies") }, enabled = running == true, modifier = Modifier.weight(1f),
+                colors = ButtonDefaults.textButtonColorsPrimary())
         }
     }
 }
@@ -206,7 +221,7 @@ fun ProxiesPage(onBack: (() -> Unit)?) {
         }
     }
     val group = state.groups?.firstOrNull { it.key == opened }
-    WindowBottomSheet(show = group != null, title = group?.name ?: "", onDismissRequest = { opened = null }) {
+    Sheet(show = group != null, title = group?.name ?: "", onDismissRequest = { opened = null }) {
         if (group != null) ProxyNodes(group) { opened = null }
     }
 }
@@ -337,7 +352,7 @@ fun ConnectionsPage(onBack: () -> Unit) {
     ConfirmDialog(show = confirmAll, title = "断开全部连接", summary = "正在进行的下载和通话会被中断。", confirm = "断开", danger = true,
         onDismiss = { confirmAll = false }) { confirmAll = false; state.close() }
     val shown = detail
-    WindowBottomSheet(show = shown != null, title = "连接详情", onDismissRequest = { detail = null }) {
+    Sheet(show = shown != null, title = "连接详情", onDismissRequest = { detail = null }) {
         if (shown != null) {
             val value = shown.value
             val metadata = value["metadata"] as? JsonObject

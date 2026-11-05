@@ -290,7 +290,7 @@ fun ConfirmDialog(
     onDismiss: () -> Unit,
     onConfirm: () -> Unit,
 ) {
-    WindowDialog(show = show, title = title, summary = summary, onDismissRequest = onDismiss) {
+    Dialog(show = show, title = title, summary = summary, onDismissRequest = onDismiss) {
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             TextButton(text = "取消", onClick = onDismiss, modifier = Modifier.weight(1f))
             TextButton(
@@ -317,7 +317,7 @@ fun EditDialog(
 ) {
     var text by remember(show, initial) { mutableStateOf(initial) }
     var error by remember(show) { mutableStateOf("") }
-    WindowDialog(show = show, title = title, summary = summary, onDismissRequest = onDismiss) {
+    Dialog(show = show, title = title, summary = summary, onDismissRequest = onDismiss) {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             TextField(value = text, onValueChange = { text = it; error = "" }, singleLine = !multiline,
                 minLines = if (multiline) 4 else 1, maxLines = if (multiline) 10 else 1, modifier = Modifier.fillMaxWidth())
@@ -358,4 +358,37 @@ fun formatBytes(bytes: Double?): String {
     while (amount >= 1024 && index < units.lastIndex) { amount /= 1024; index++ }
     val text = if (index == 0 || amount >= 100) amount.toLong().toString() else ((amount * 10).toLong() / 10.0).toString()
     return "$text ${units[index]}"
+}
+
+/** 内核版本精简显示："Mihomo Meta alpha-smart-xxx android arm64 with go…" → "alpha-smart-xxx"。 */
+fun shortVersion(raw: String): String {
+    val text = raw.trim().removePrefix("Mihomo").trim().removePrefix("Meta").trim()
+    return text.substringBefore(' ').ifBlank { raw.trim() }
+}
+
+/** 底部弹窗：WindowBottomSheet + 系统返回键关闭。 */
+@Composable
+fun Sheet(
+    show: Boolean,
+    title: String? = null,
+    onDismissRequest: () -> Unit,
+    onDismissFinished: (() -> Unit)? = null,
+    content: @Composable () -> Unit,
+) {
+    BackHandler(enabled = show, onBack = onDismissRequest)
+    top.yukonga.miuix.kmp.window.WindowBottomSheet(show = show, title = title, onDismissRequest = onDismissRequest,
+        onDismissFinished = onDismissFinished, content = content)
+}
+
+/** 对话框：WindowDialog + 系统返回键关闭。 */
+@Composable
+fun Dialog(
+    show: Boolean,
+    title: String? = null,
+    summary: String? = null,
+    onDismissRequest: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    BackHandler(enabled = show, onBack = onDismissRequest)
+    WindowDialog(show = show, title = title, summary = summary, onDismissRequest = onDismissRequest, content = content)
 }

@@ -38,7 +38,6 @@ import top.yukonga.miuix.kmp.icon.extended.Backup
 import top.yukonga.miuix.kmp.icon.extended.Notes
 import top.yukonga.miuix.kmp.icon.extended.Refresh
 import top.yukonga.miuix.kmp.theme.MiuixTheme
-import top.yukonga.miuix.kmp.window.WindowBottomSheet
 import kotlin.time.TimeSource
 
 private const val toolsDefaultRepo = "liuran001/mihomo"
@@ -314,7 +313,7 @@ fun ConfigPage(onBack: () -> Unit, onNavigate: (String) -> Unit) {
             }
         }
     }
-    WindowBottomSheet(show = editing, title = "编辑 config.yaml", onDismissRequest = { editing = false }) {
+    Sheet(show = editing, title = "编辑 config.yaml", onDismissRequest = { editing = false }) {
         Column(Modifier.fillMaxWidth().padding(bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             TextField(value = state.content, onValueChange = { state.content = it }, modifier = Modifier.fillMaxWidth().heightIn(min = 240.dp, max = 520.dp),
                 textStyle = MiuixTheme.textStyles.main.copy(fontFamily = FontFamily.Monospace, fontSize = 12.sp))
@@ -353,7 +352,7 @@ fun BackupsPage(onBack: () -> Unit) {
         }
     }
     val name = state.previewName
-    WindowBottomSheet(show = name != null, title = name?.let { backupTitle(it) }.orEmpty(), onDismissRequest = { state.previewName = null }) {
+    Sheet(show = name != null, title = name?.let { backupTitle(it) }.orEmpty(), onDismissRequest = { state.previewName = null }) {
         Column(Modifier.fillMaxWidth().padding(bottom = 16.dp)) {
             Card(Modifier.heightIn(max = 380.dp)) {
                 Box(Modifier.verticalScroll(rememberScrollState())) { CodeBlock(state.preview) }
@@ -405,7 +404,8 @@ fun CorePage(onBack: () -> Unit) {
                 info.boolean("installed") -> "已安装"
                 else -> "未安装"
             }, valueColor = if (info?.boolean("installed") == true) Tone.success else Tone.warning)
-            if (info?.boolean("installed") == true) InfoRow("版本", info.string("version").ifBlank { "未知" })
+            if (info?.boolean("installed") == true) InfoRow("版本", shortVersion(info.string("version")).ifBlank { "未知" },
+                summary = info.string("version").takeIf { it.contains(' ') })
         }
         item(key = "actions") {
             ButtonRow {

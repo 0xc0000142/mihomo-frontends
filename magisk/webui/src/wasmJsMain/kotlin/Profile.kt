@@ -40,7 +40,6 @@ import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Add
 import top.yukonga.miuix.kmp.icon.extended.Tune
 import top.yukonga.miuix.kmp.theme.MiuixTheme
-import top.yukonga.miuix.kmp.window.WindowBottomSheet
 
 internal data class ConfigField(
     val id: String,
@@ -297,7 +296,7 @@ fun ProfilePage(onBack: () -> Unit) {
 
 @Composable
 internal fun SaveDialog(show: Boolean, onDismiss: () -> Unit, onSave: (Boolean) -> Unit) {
-    top.yukonga.miuix.kmp.window.WindowDialog(show = show, title = "保存配置", summary = "保存前会先校验配置，失败时不会写入。",
+    Dialog(show = show, title = "保存配置", summary = "保存前会先校验配置，失败时不会写入。",
         onDismissRequest = onDismiss) {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             TextButton("保存并重启服务", onClick = { onSave(true) }, modifier = Modifier.fillMaxWidth(),
@@ -372,7 +371,7 @@ private fun ItemSheet(target: Pair<String, ConfigItem?>?, onDismiss: () -> Unit)
     var editing by remember(target) { mutableStateOf<ConfigField?>(null) }
     var error by remember(target) { mutableStateOf("") }
     var confirmDelete by remember(target) { mutableStateOf(false) }
-    WindowBottomSheet(show = target != null, title = when {
+    Sheet(show = target != null, title = when {
         existing != null -> existing.name
         kind == "provider" -> "添加订阅"
         else -> "添加规则集"

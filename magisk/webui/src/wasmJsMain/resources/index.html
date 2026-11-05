@@ -21,7 +21,11 @@
       right: var(--safe-area-inset-right, env(safe-area-inset-right, 0px));
       bottom: var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px));
       left: var(--safe-area-inset-left, env(safe-area-inset-left, 0px));
+      /* 手势全部交给 Compose：否则 WebView 接管纵向平移并发出 pointercancel，列表无法滑动 */
+      touch-action: none;
+      overscroll-behavior: none;
     }
+    #composeApp canvas { touch-action: none; }
     #loading {
       position: fixed;
       inset: 0;

@@ -663,6 +663,34 @@
     if (!data.secret) {
       step('secret', '生成控制器密钥', '防止本机其它应用调用控制接口', true, () => { doc.set('secret', randomHex(16)); refresh(); });
     }
+    // 内核只允许数据目录内的路径（SAFE_PATHS）；导入的路由器配置常带 /etc/... 等绝对路径。
+    const pathFixes = [];
+    const relative = (value, fallback) => {
+      const base = String(value).replace(/\\/g, '/').replace(/\/+$/, '').split('/').filter(Boolean).pop();
+      return './' + (fallback ? fallback + '/' : '') + (base || 'file');
+    };
+    const isUnsafe = (value) => typeof value === 'string' && (value.startsWith('/') || /^[A-Za-z]:[\\/]/.test(value) || value.split(/[\\/]/).includes('..'));
+    if (isUnsafe(data['external-ui'])) pathFixes.push([['external-ui'], './dashboard']);
+    for (const [section, dir] of [['proxy-providers', 'proxy_provider'], ['rule-providers', 'rule_provider']]) {
+      const items = isObject(data[section]) ? data[section] : {};
+      for (const [name, item] of Object.entries(items)) {
+        if (isObject(item) && isUnsafe(item.path)) pathFixes.push([[section, name, 'path'], relative(item.path, dir)]);
+      }
+    }
+    for (const key of ['geoip', 'geosite', 'mmdb', 'asn']) {
+      if (isObject(data['geox-path']) && isUnsafe(data['geox-path'][key])) pathFixes.push([['geox-path', key], relative(data['geox-path'][key])]);
+    }
+    if (pathFixes.length) {
+      step('paths', '改写数据目录外的路径', pathFixes.map(([path]) => path.join('.')).slice(0, 4).join('、') +
+        (pathFixes.length > 4 ? ' 等 ' + pathFixes.length + ' 项' : '') + ' 指向数据目录外，内核会拒绝加载，改为相对路径', false, () => {
+        for (const [path, value] of pathFixes) {
+          const node = doc.getIn(path.slice(0, -1), true);
+          // 带合并键的条目直接在条目层写入，避免改到锚点
+          if (Y.isMap(node)) node.set(path[path.length - 1], value); else setIn(doc, path, value);
+        }
+        refresh();
+      });
+    }
     if (!data['external-ui']) {
       step('dashboard', '配置网页面板', '使用 zashboard，首次访问时自动下载', true, () => {
         doc.set('external-ui', './dashboard');

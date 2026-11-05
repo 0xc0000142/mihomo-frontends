@@ -392,7 +392,7 @@ test('host probe, URL import and config engine operations are exposed with valid
   const bridge = makeBridge({ handler: (command) => {
     if (command === scriptRoot + 'host.sh probe') return jsonResult({ ok: true, ipv6: false, mem_mb: 4000 });
     if (command.startsWith(scriptRoot + 'host.sh fetch ')) return jsonResult({ ok: true, size: 12 });
-    if (command.startsWith('(base64 -w 0 ')) return result(Buffer.from('mixed-port: 1\n').toString('base64'));
+    if (command.startsWith('( (base64 -w 0 ')) return result(Buffer.from('mixed-port: 1\n').toString('base64'));
     return undefined;
   } });
   assert.equal((await bridge.request('hostProbe')).ipv6, false);

@@ -295,13 +295,10 @@ internal object LiveOverview {
     }
 
     suspend fun load() {
-        status = null
+        // 刷新期间保留上次的值，避免卡片闪成「—」；失败时由对应的 *Error 提示
         statusError = ""
-        core = null
         coreError = ""
-        policy = null
         policyError = ""
-        controllerVersion = ""
         controllerAddress = ""
         controllerError = ""
         val statusResult = liveCapture {
@@ -408,6 +405,11 @@ internal object LiveProxies {
                     selected = proxy.liveText("now"),
                     options = proxy.liveStrings("all").distinct(),
                 )
+            }.let { list ->
+                // 控制器按名称返回；GLOBAL 的 all 保持配置文件中的顺序，据此排序，GLOBAL 放最后。
+                val order = (proxies["GLOBAL"] as? JsonObject)?.liveStrings("all").orEmpty()
+                    .withIndex().associate { it.value to it.index }
+                list.sortedWith(compareBy({ it.name == "GLOBAL" }, { order[it.name] ?: Int.MAX_VALUE }))
             }
             stale = false
         } finally {

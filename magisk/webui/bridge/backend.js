@@ -630,7 +630,8 @@
   }, async (payload) => {
     await shJson(SH + 'host.sh fetch ' + shq(payload.url) + ' ' + shq(payload.ua || 'clash.meta'), 90000);
     const file = shq(DATA + '/run/import.yaml');
-    const result = await exec('(base64 -w 0 ' + file + ' 2>/dev/null || base64 ' + file + ' | tr -d "\\n"); status=$?; rm -f ' + file + '; exit $status', 30000);
+    // KernelSU 用 libsu 的持久 shell 执行命令，顶层 exit 会被当成失败；整条命令放进子 shell。
+    const result = await exec('( (base64 -w 0 ' + file + ' 2>/dev/null || base64 ' + file + ' | tr -d "\\n"); status=$?; rm -f ' + file + '; exit $status )', 30000);
     if (result.errno !== 0 || !result.stdout.trim()) throw new Error(result.stderr || '读取下载内容失败');
     return { ok: true, content: b64decode(result.stdout.trim()) };
   });

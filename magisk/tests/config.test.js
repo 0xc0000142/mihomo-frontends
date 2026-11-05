@@ -227,3 +227,27 @@ test('optimize replaces multiple or flow-style listeners with one block listener
   assert.match(result.changes.find((change) => change.id === 'ebpf').detail, /移除 1 个/);
   assert.match(policyRender(result.content), /mode: hybrid/);
 });
+
+test('optimize rewrites absolute paths outside the data directory', () => {
+  const config = [
+    'external-ui: /path/to/ui/folder/',
+    'proxies: []',
+    'proxy-providers:',
+    '  a: {type: http, url: "https://e/a", path: /etc/clash/a.yaml}',
+    'rule-providers:',
+    '  r: {type: http, behavior: domain, url: "https://e/r", path: ../r.yaml}',
+    '  ok: {type: http, behavior: domain, url: "https://e/o", path: ./rules/ok.yaml}',
+    'geox-path: {geoip: /opt/geoip.dat}',
+    '',
+  ].join('\n');
+  const result = C.optimize(config, { ipv6: true });
+  const change = result.changes.find((item) => item.id === 'paths');
+  assert.ok(change && change.optional === false);
+  const data = plain(result.content);
+  assert.equal(data['external-ui'], './dashboard');
+  assert.equal(data['proxy-providers'].a.path, './proxy_provider/a.yaml');
+  assert.equal(data['rule-providers'].r.path, './rule_provider/r.yaml');
+  assert.equal(data['rule-providers'].ok.path, './rules/ok.yaml');
+  assert.equal(data['geox-path'].geoip, './geoip.dat');
+  assert.equal(C.optimize(result.content, { ipv6: true }).changes.some((item) => item.id === 'paths'), false);
+});
