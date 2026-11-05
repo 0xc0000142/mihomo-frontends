@@ -44,6 +44,13 @@ import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Close
 import top.yukonga.miuix.kmp.icon.extended.Refresh
 import top.yukonga.miuix.kmp.icon.extended.Search
+import top.yukonga.miuix.kmp.icon.extended.Tune
+import top.yukonga.miuix.kmp.icon.extended.Update
+import top.yukonga.miuix.kmp.icon.extended.Link
+import top.yukonga.miuix.kmp.icon.extended.Layers
+import top.yukonga.miuix.kmp.icon.extended.Info
+import top.yukonga.miuix.kmp.icon.extended.File
+import top.yukonga.miuix.kmp.icon.extended.Notes
 import top.yukonga.miuix.kmp.preference.CheckboxPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
@@ -465,7 +472,7 @@ fun SettingsPage(onNavigate: (String) -> Unit) {
                         if (!state.interfacesLoaded) state.discoverInterfaces()
                     }
                 }
-                ArrowRow("共享与数据面", "tc / socket_assign、共享设备 DNS、按设备排除") { onNavigate("network") }
+                ArrowRow("共享高级设置", "共享方式、共享设备的 DNS、排除某些设备") { onNavigate("network") }
             }
             group("应用绕过") {
                 val count = draft.packages.settingsPackages().size
@@ -486,17 +493,22 @@ fun SettingsPage(onNavigate: (String) -> Unit) {
                         valueColor = if (state.allowed == true) Tone.success else Tone.warning)
                 }
             }
-            group("更多") {
-                ArrowRow("内核配置", "DNS、eBPF、订阅与规则集") { onNavigate("profile") }
-                ArrowRow("Tailscale", "网页登录，访问 Tailnet 里的设备") { onNavigate("tailscale") }
-                ArrowRow("网页管理", "在局域网或 Tailnet 里用浏览器管理模块") { onNavigate("webui") }
-                ArrowRow("zashboard 面板", if (Dashboard.opening) "正在打开…" else "在浏览器里打开内核自带的面板") {
+            group("代理与内核") {
+                ArrowRow("内核配置", "订阅、分流规则、DNS 与透明代理参数", startIcon = MiuixIcons.Regular.Tune) { onNavigate("profile") }
+                ArrowRow("内核版本", "下载、更新或回滚 mihomo 内核", startIcon = MiuixIcons.Regular.Update) { onNavigate("core") }
+            }
+            group("远程访问") {
+                ArrowRow("网页管理", "在其它设备的浏览器里管理本模块", startIcon = MiuixIcons.Regular.Link) { onNavigate("webui") }
+                ArrowRow("Tailscale", "在外网安全访问本机与家里的设备", startIcon = MiuixIcons.Regular.Layers) { onNavigate("tailscale") }
+                ArrowRow("zashboard 面板", if (Dashboard.opening) "正在打开…" else "功能更全的代理面板，在浏览器里打开",
+                    startIcon = MiuixIcons.Regular.Info) {
                     Dashboard.open { message -> dashboardError = message }
                 }
-                ArrowRow("内核管理", "下载、更新与回滚") { onNavigate("core") }
-                ArrowRow("配置文件与备份") { onNavigate("config") }
-                ArrowRow("重新运行向导", "重新检测本机并生成配置") { onNavigate("setup") }
-                ArrowRow("日志") { onNavigate("logs") }
+            }
+            group("维护") {
+                ArrowRow("配置文件与备份", "查看、导入与恢复配置", startIcon = MiuixIcons.Regular.File) { onNavigate("config") }
+                ArrowRow("日志", "排查连不上、规则不生效等问题", startIcon = MiuixIcons.Regular.Notes) { onNavigate("logs") }
+                ArrowRow("重新运行向导", "重新检测本机网络并生成配置", startIcon = MiuixIcons.Regular.Refresh) { onNavigate("setup") }
             }
         }
         if (state.dirty) {

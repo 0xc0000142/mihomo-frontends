@@ -405,8 +405,15 @@ fun CorePage(onBack: () -> Unit) {
                 info.boolean("installed") -> "已安装"
                 else -> "未安装"
             }, valueColor = if (info?.boolean("installed") == true) Tone.success else Tone.warning)
-            if (info?.boolean("installed") == true) InfoRow("版本", shortVersion(info.string("version")).ifBlank { "未知" },
-                summary = info.string("version").takeIf { it.contains(' ') })
+            if (info?.boolean("installed") == true) {
+                // "Mihomo Meta <版本> android arm64 with go1.x <构建时间>" 拆成几行显示
+                val raw = info.string("version").trim()
+                val words = raw.removePrefix("Mihomo").trim().removePrefix("Meta").trim().split(Regex("\\s+"))
+                InfoRow("版本", shortVersion(raw).ifBlank { "未知" })
+                val with = words.indexOf("with")
+                if (with > 1) InfoRow("平台", words.subList(1, with).joinToString(" "))
+                if (with >= 0 && with + 1 < words.size) InfoRow("构建", words.subList(with + 1, words.size).joinToString(" "))
+            }
         }
         item(key = "actions") {
             ButtonRow {

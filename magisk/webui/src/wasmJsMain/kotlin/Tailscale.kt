@@ -314,7 +314,7 @@ fun TailscalePage(onBack: () -> Unit) {
             item(key = "empty") {
                 Column {
                     EmptyState(MiuixIcons.Regular.Link, "还没有 Tailscale 出站")
-                    Caption("添加后，访问 Tailnet 地址（100.64.0.0/10）的流量会走 Tailscale。不填 auth key 时，用浏览器登录账号即可。")
+                    Caption("Tailscale 能把你的手机、电脑、家里的设备连成一个私有网络，在外面也能互相访问。添加后用浏览器登录账号即可，不需要填写 auth key。")
                     ButtonRow { ActionButton("添加 Tailscale", primary = true, enabled = state.busy.isEmpty()) { adding = true } }
                 }
             }
@@ -328,8 +328,8 @@ fun TailscalePage(onBack: () -> Unit) {
                 if (entry.tailnet.isNotEmpty()) InfoRow("Tailnet", entry.tailnet)
                 if (entry.magicDns.isNotEmpty()) InfoRow("MagicDNS", entry.magicDns)
                 val hostname = entry.fields.firstOrNull { it.id == "hostname" }?.let { fieldText(it.value) }.orEmpty()
-                ArrowRow("出站设置", "设备名、auth key、子网路由与出口节点", value = hostname, enabled = state.busy.isEmpty()) { editing = entry }
-                if (entry.stateDir.isEmpty()) Caption("state-dir 不在数据目录之内，无法读取登录状态", Tone.warning)
+                ArrowRow("设置", "设备名、登录密钥、共享的网段与出口节点", value = hostname, enabled = state.busy.isEmpty()) { editing = entry }
+                if (entry.stateDir.isEmpty()) Caption("登录信息没有保存在模块数据目录里，这里无法显示是否已登录", Tone.warning)
                 ButtonRow(Modifier.padding(top = 4.dp)) {
                     if (entry.loggedIn) {
                         ActionButton("退出登录", enabled = state.busy.isEmpty()) { leaving = entry }
@@ -341,7 +341,7 @@ fun TailscalePage(onBack: () -> Unit) {
             }
         }
         item(key = "note") {
-            Caption("规则里的 100.64.0.0/10 与 fd7a:115c:a1e0::/48 走 Tailscale，eBPF 不会把这两个网段当作私网直连。登录状态保存在数据目录，重启后不用重新登录。")
+            Caption("访问 Tailscale 里其它设备（100.x.x.x 地址）的流量会自动走 Tailscale。登录状态会保存下来，重启后不用重新登录。")
         }
     }
     AddSheet(adding, onDismiss = { adding = false })

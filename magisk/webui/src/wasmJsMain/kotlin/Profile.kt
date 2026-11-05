@@ -39,6 +39,10 @@ import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Add
 import top.yukonga.miuix.kmp.icon.extended.Tune
+import top.yukonga.miuix.kmp.icon.extended.Settings
+import top.yukonga.miuix.kmp.icon.extended.Layers
+import top.yukonga.miuix.kmp.icon.extended.Search
+import top.yukonga.miuix.kmp.icon.extended.Link
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 internal data class ConfigField(
@@ -228,8 +232,12 @@ fun ProfilePage(onBack: () -> Unit) {
     var item by remember { mutableStateOf<Pair<String, ConfigItem?>?>(null) }
     var confirmSave by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { state.load() }
+    val section = state.sections.firstOrNull { it.id == opened }
+    BackHandler(enabled = section != null) { opened = null }
     Box(Modifier.fillMaxSize()) {
-        Page(title = "内核配置", navigationIcon = { BackIcon(onBack) }, bottomPadding = if (state.dirty) 88.dp else 0.dp) {
+        Page(title = section?.title ?: "内核配置", subtitle = section?.summary.orEmpty(),
+            navigationIcon = { BackIcon(if (section != null) ({ opened = null }) else onBack) },
+            bottomPadding = if (state.dirty) 88.dp else 0.dp) {
             banner(state.busy, BannerKind.Progress, "busy")
             banner(state.error, BannerKind.Error, "error")
             banner(state.notice, BannerKind.Success, "notice")
@@ -242,40 +250,50 @@ fun ProfilePage(onBack: () -> Unit) {
                 }
                 return@Page
             }
-            state.summary?.let { summary ->
-                group("概况") {
-                    InfoRow("节点 / 订阅", "${summary.string("proxies")} / ${summary.string("providers")}")
-                    InfoRow("策略组 / 规则", "${summary.string("groups")} / ${summary.string("rules")}")
-                    if (summary.boolean("tun")) InfoRow("TUN", "已开启（与 eBPF 冲突）", valueColor = Tone.warning)
+            if (section != null) {
+                group(null, "section:${section.id}") {
+                    if (!section.available) Caption("当前配置还没有开启透明代理，请先在「设置 › 重新运行向导」里完成本机优化。", Tone.warning)
+                    else for (field in section.fields) ConfigFieldRow(field, state.value(field)) { editing = field }
                 }
+                return@Page
             }
-            for (section in state.sections) {
-                group(section.title, section.id) {
-                    if (!section.available) {
-                        Caption("配置里没有 eBPF 入站，请在向导中执行「本机优化」后再编辑。", Tone.warning)
-                    } else {
-                        val shown = if (opened == section.id || section.fields.size <= 6) section.fields else section.fields.take(5)
-                        for (field in shown) ConfigFieldRow(field, state.value(field)) { editing = field }
-                        if (shown.size < section.fields.size) {
-                            ArrowRow("更多选项", value = "${section.fields.size - shown.size} 项") { opened = section.id }
-                        }
+            state.summary?.let { summary ->
+                item(key = "stats") {
+                    Row(Modifier.padding(horizontal = 12.dp).padding(bottom = 12.dp).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        ProfileStat("节点", summary.string("proxies"), Modifier.weight(1f))
+                        ProfileStat("订阅", summary.string("providers"), Modifier.weight(1f))
+                        ProfileStat("策略组", summary.string("groups"), Modifier.weight(1f))
+                        ProfileStat("规则", summary.string("rules"), Modifier.weight(1f))
                     }
                 }
+                if (summary.boolean("tun")) banner("配置里开启了 TUN，会和透明代理冲突，建议在向导里执行本机优化关闭它。", BannerKind.Error, "tun")
             }
             group("订阅", "providers") {
                 for (provider in state.providers) {
                     val url = provider.fields.firstOrNull { it.id == "url" }?.let { fieldText(it.value) }.orEmpty()
                     ArrowRow(provider.name, url.ifEmpty { provider.type }, enabled = provider.editable) { item = "provider" to provider }
                 }
-                ArrowRow("添加订阅", startIcon = MiuixIcons.Regular.Add) { item = "provider" to null }
+                ArrowRow("添加订阅", "填入机场提供的订阅链接", startIcon = MiuixIcons.Regular.Add) { item = "provider" to null }
             }
             group("规则集", "ruleProviders") {
                 for (ruleSet in state.ruleProviders) {
                     val behavior = ruleSet.fields.firstOrNull { it.id == "behavior" }
                     ArrowRow(ruleSet.name, behavior?.let { fieldDisplay(it, it.value) }, enabled = ruleSet.editable) { item = "ruleProvider" to ruleSet }
                 }
-                ArrowRow("添加规则集", startIcon = MiuixIcons.Regular.Add) { item = "ruleProvider" to null }
+                ArrowRow("添加规则集", "从网上引用一组域名或 IP 规则", startIcon = MiuixIcons.Regular.Add) { item = "ruleProvider" to null }
             }
+            group("高级设置", "sections") {
+                for (s in state.sections) {
+                    val icon = when (s.id) {
+                        "basic" -> MiuixIcons.Regular.Settings
+                        "controller" -> MiuixIcons.Regular.Layers
+                        "dns" -> MiuixIcons.Regular.Search
+                        else -> MiuixIcons.Regular.Link
+                    }
+                    ArrowRow(s.title, s.summary, startIcon = icon) { opened = s.id }
+                }
+            }
+            item(key = "hint") { Caption("改动会先暂存，点底部「保存」后才写入配置。") }
         }
         if (state.dirty) {
             Row(
@@ -439,5 +457,16 @@ private fun ItemSheet(target: Pair<String, ConfigItem?>?, onDismiss: () -> Unit)
         confirmDelete = false
         existing?.let { state.collection("$kind.delete", it.name) }
         onDismiss()
+    }
+}
+
+@Composable
+private fun ProfileStat(label: String, value: String, modifier: Modifier) {
+    top.yukonga.miuix.kmp.basic.Card(modifier, insideMargin = androidx.compose.foundation.layout.PaddingValues(vertical = 12.dp)) {
+        Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(value.ifEmpty { "—" }, fontSize = 18.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                color = MiuixTheme.colorScheme.onSurface)
+            Text(label, fontSize = 12.sp, color = Tone.muted)
+        }
     }
 }

@@ -15,7 +15,10 @@ case "$1" in
     status_policy=$(printf '"desired":"%s","allowed":%s,"current_ssid":"%s"' "$desired" "$allowed" "$(json_escape "$current_wifi_ssid")")
     if pid_alive; then
       rss=$(awk '/VmRSS/{print $2}' "/proc/$running_pid/status" 2>/dev/null)
-      printf '{"ok":true,"running":true,"pid":%s,"rss_kb":%s,"uptime":null,%s}\n' "$running_pid" "${rss:-null}" "$status_policy"
+      started=$(stat -c %Y "/proc/$running_pid" 2>/dev/null)
+      uptime=null
+      case "$started" in ''|*[!0-9]*) ;; *) uptime=$(( $(date +%s) - started )); [ "$uptime" -ge 0 ] || uptime=null ;; esac
+      printf '{"ok":true,"running":true,"pid":%s,"rss_kb":%s,"uptime":%s,%s}\n' "$running_pid" "${rss:-null}" "$uptime" "$status_policy"
     else
       printf '{"ok":true,"running":false,"pid":null,"rss_kb":null,"uptime":null,%s}\n' "$status_policy"
     fi

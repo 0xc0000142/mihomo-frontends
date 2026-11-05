@@ -741,7 +741,7 @@ test('controller surfaces curl, HTTP, missing status and invalid JSON errors', a
 test('controller refuses streaming endpoints, traversal, malformed encodings and invalid parameters', async () => {
   const bridge = makeBridge();
   for (const target of [
-    '/traffic', '/logs', '/memory', '/configs', '/providers/proxies', '/versioned', '//evil.example/version',
+    '/traffic', '/logs', '/memory', '/configs', '/providers/rules', '/rulesets', '/ebpfx', '/versioned', '//evil.example/version',
     'https://evil.example/version', '/proxies/../configs', '/proxies/%2e%2e/configs',
     '/proxies/%2e/configs', '/proxies/%2F..%2Fconfigs', '/proxies/%5c..%5cconfigs',
     '/proxies/has space', '/proxies/a#fragment', '/proxies/%00', '/proxies/%0a', '/proxies/%ZZ',

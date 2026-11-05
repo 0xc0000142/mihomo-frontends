@@ -694,7 +694,7 @@
 
   function validController(payload) {
     text(payload.path, 'path');
-    if (!/^\/(?:version|proxies|connections|group\/[^/?]+\/delay)(?:[/?]|$)/.test(payload.path) || /[\x00-\x20\x7f#\\]/.test(payload.path)) throw new Error('不支持的控制器接口（不读取流接口）');
+    if (!/^\/(?:version|proxies|connections|rules|ebpf|providers\/proxies|group\/[^/?]+\/delay)(?:[/?]|$)/.test(payload.path) || /[\x00-\x20\x7f#\\]/.test(payload.path)) throw new Error('不支持的控制器接口（不读取流接口）');
     const pathname = payload.path.split('?')[0];
     let decoded;
     try { decoded = decodeURIComponent(pathname); }

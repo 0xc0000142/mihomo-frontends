@@ -159,26 +159,26 @@
       id: 'basic', title: '基础', summary: '端口、运行模式与日志',
       fields: [
         { path: ['mode'], label: '运行模式', summary: '规则：按规则分流；全局：全部走 GLOBAL 组选中的节点；直连：全部不走代理', type: 'enum', options: [['rule', '规则'], ['global', '全局'], ['direct', '直连']], def: 'rule' },
-        { path: ['mixed-port'], label: '混合端口', summary: 'HTTP/SOCKS5 入站，0 为关闭', type: 'int', min: 0, max: 65535 },
+        { path: ['mixed-port'], label: '混合端口', summary: '给其它应用手动设置的 HTTP/SOCKS5 代理端口；透明代理不需要，0 为关闭', type: 'int', min: 0, max: 65535 },
         { path: ['allow-lan'], label: '允许局域网连接', summary: '公共 Wi-Fi 下建议关闭', type: 'bool', def: false },
         { path: ['bind-address'], label: '监听地址', summary: '允许局域网连接时监听的地址，* 为全部网卡', type: 'text', placeholder: '*' },
         { path: ['ipv6'], label: 'IPv6', summary: '关闭后内核不处理 IPv6 连接与解析', type: 'bool', def: true },
         { path: ['log-level'], label: '日志级别', summary: '调试会产生大量日志并更耗电，排查问题时再打开', type: 'enum', options: [['silent', '静默'], ['error', '错误'], ['warning', '警告'], ['info', '信息'], ['debug', '调试']], def: 'info' },
-        { path: ['find-process-mode'], label: '查找进程', summary: '按应用分流时需要；off 更省电', type: 'enum', options: [['always', '总是'], ['strict', '按需'], ['off', '关闭']], def: 'strict' },
-        { path: ['tcp-concurrent'], label: 'TCP 并发', summary: '同时连接解析出的多个 IP，取最快', type: 'bool', def: false },
-        { path: ['unified-delay'], label: '统一延迟', summary: '测速时扣除握手耗时', type: 'bool', def: false },
+        { path: ['find-process-mode'], label: '识别连接来自哪个应用', summary: '规则里按应用分流时需要；关闭更省电', type: 'enum', options: [['always', '总是'], ['strict', '按需'], ['off', '关闭']], def: 'strict' },
+        { path: ['tcp-concurrent'], label: 'TCP 并发连接', summary: '同时连接域名解析出的多个 IP，用最快的那个', type: 'bool', def: false },
+        { path: ['unified-delay'], label: '统一延迟', summary: '测速时扣除握手耗时，不同协议的节点延迟更可比', type: 'bool', def: false },
         { path: ['sniffer', 'enable'], label: '域名嗅探', summary: '从 TLS/HTTP 握手里读出域名，让按 IP 进来的连接也能按域名规则分流', type: 'bool', def: false },
         { path: ['profile', 'store-selected'], label: '记住手动选择的节点', summary: '重启后恢复上次在代理页手动选择的节点', type: 'bool', def: false },
-        { path: ['geodata-loader'], label: 'GEO 加载方式', summary: '低内存设备建议省内存', type: 'enum', options: [['standard', '标准'], ['memconservative', '省内存']], def: 'standard' },
+        { path: ['geodata-loader'], label: 'GEO 数据加载方式', summary: '内存紧张的设备选省内存', type: 'enum', options: [['standard', '标准'], ['memconservative', '省内存']], def: 'standard' },
       ],
     },
     {
-      id: 'controller', title: '控制器与面板', summary: 'RESTful API 与网页面板',
+      id: 'controller', title: '面板与数据文件', summary: '面板访问地址与密钥、GEO 数据下载',
       fields: [
-        { path: ['external-controller'], label: '控制器地址', summary: '仅本机使用时保持 127.0.0.1', type: 'listen', required: true },
+        { path: ['external-controller'], label: '控制器地址', summary: '面板和本页面通过它管理内核；只在本机用时保持 127.0.0.1', type: 'listen', required: true },
         { path: ['secret'], label: '控制器密钥', summary: '控制器与面板的访问密码；网页管理与 zashboard 都会用到', type: 'secret' },
         { path: ['external-ui'], label: '面板目录', summary: '面板文件存放目录，内核在 http://控制器地址/ui/ 提供面板', type: 'text', placeholder: './dashboard' },
-        { path: ['external-ui-url'], label: '面板下载地址', summary: '面板目录为空时内核从这里下载面板压缩包（例如 zashboard）', type: 'url' },
+        { path: ['external-ui-url'], label: '面板下载地址', summary: '面板目录为空时内核从这里下载面板；留空则使用 zashboard', type: 'url' },
         { path: ['geox-url', 'geoip'], label: 'GeoIP 下载地址', summary: 'GEOIP 规则使用的数据文件', type: 'url' },
         { path: ['geox-url', 'geosite'], label: 'GeoSite 下载地址', summary: 'GEOSITE 规则使用的数据文件', type: 'url' },
         { path: ['geox-url', 'mmdb'], label: 'MMDB 下载地址', summary: 'GeoIP 的 MaxMind 格式数据', type: 'url' },
@@ -186,7 +186,7 @@
       ],
     },
     {
-      id: 'dns', title: 'DNS', summary: '解析模式与上游服务器',
+      id: 'dns', title: 'DNS', summary: '域名怎样解析、用哪些服务器',
       fields: [
         { path: ['dns', 'enable'], label: '启用 DNS', summary: '由内核接管 DNS 解析；透明代理与 FakeIP 都依赖它', type: 'bool', def: false },
         { path: ['dns', 'listen'], label: '监听地址', summary: '内核 DNS 服务监听地址，eBPF 劫持的 DNS 会转到这里', type: 'listen', placeholder: '127.0.0.1:1053' },
@@ -201,22 +201,22 @@
       ],
     },
     {
-      id: 'ebpf', title: 'eBPF 透明代理', summary: '协议、内核直连与数据面',
+      id: 'ebpf', title: '透明代理', summary: '哪些流量交给 mihomo、怎样接管',
       fields: [
         { path: [L, 'network'], label: '协议', summary: '透明代理接管的协议；只代理 TCP 时 UDP 直接走系统网络', type: 'enum', options: [['tcp,udp', 'TCP + UDP'], ['tcp', '仅 TCP'], ['udp', '仅 UDP']], def: 'tcp,udp', joined: true },
         { path: [L, 'udp-timeout'], label: 'UDP 会话超时（秒）', summary: 'UDP 会话空闲多久后释放', type: 'int', min: 5, max: 86400, placeholder: '300' },
-        { path: [L, 'bypass-rule-set'], label: '内核直连的规则集', summary: '命中的目标不进入 mihomo，省电', type: 'list', ruleSets: 'ipcidr', limit: 32 },
-        { path: [L, 'fakeip-icmp'], label: 'FakeIP 的 ICMP', summary: '本地应答：ping FakeIP 地址时由内核直接回复，避免被误判断网；需要本机数据面为 tc 或开启共享', type: 'enum', options: [['off', '关闭'], ['reply', '本地应答']], def: 'off' },
-        { path: [L, 'bypass-tun-direct'], label: 'TUN 共存直连', summary: '与其它 VPN 应用共存', type: 'bool', def: true },
-        { path: [L, 'local', 'data-plane'], label: '本机数据面', summary: 'cgroup（默认）：在应用发起连接时改写目标地址，兼容性最好；tc：在默认网卡出口选包经 veth 交给 mihomo，需要内核 5.7+，可配合 FakeIP 的 ICMP 应答', type: 'enum', options: [['cgroup', 'cgroup'], ['tc', 'tc']], def: 'cgroup' },
-        { path: [L, 'local', 'ipv6'], label: '本机处理 IPv6', summary: '本机的 IPv6 连接也进入透明代理', type: 'bool', def: true },
-        { path: [L, 'local', 'bypass-private-address'], label: '本机私网地址直连', summary: '私网地址（含 Tailnet 的 100.64.0.0/10）不经过 mihomo；网关需要看到局域网连接时关闭', type: 'bool', def: true },
-        { path: [L, 'local', 'bypass-exclude'], label: '本机强制进入 mihomo 的地址段', summary: '即使命中私网直连，这些网段仍交给 mihomo（如 Tailnet 100.64.0.0/10）', type: 'list', item: 'cidr', limit: 256 },
-        { path: [L, 'local', 'bypass-port'], label: '本机直连的目标端口', summary: '访问这些目标端口时不经过 mihomo', type: 'list', item: 'port', limit: 256 },
-        { path: [L, 'shared', 'data-plane'], label: '共享数据面', summary: 'packet_rewrite（默认）：在共享网卡入口改写目标地址、出口还原，需要以太网帧（热点、USB 共享）；socket_assign：保留原始地址直接交给 mihomo，需要内核 5.7+，无以太网头的链路也能用', type: 'enum', options: [['packet_rewrite', 'packet_rewrite'], ['socket_assign', 'socket_assign']], def: 'packet_rewrite' },
-        { path: [L, 'shared', 'dns-mode'], label: '共享设备 DNS', summary: '劫持：共享设备的 DNS 全部交给内核；按规则：按分流规则决定；关闭：不处理', type: 'enum', options: [['hijack', '劫持'], ['respect_policy', '按规则'], ['off', '关闭']], def: 'hijack' },
-        { path: [L, 'shared', 'ipv6'], label: '共享处理 IPv6', summary: '共享设备的 IPv6 连接也进入透明代理', type: 'bool', def: true },
-        { path: [L, 'shared', 'bypass-private-address'], label: '共享私网地址直连', summary: '共享设备访问私网地址时不经过 mihomo', type: 'bool', def: true },
+        { path: [L, 'bypass-rule-set'], label: '直接放行的地址规则集', summary: '命中这些规则集的目标在内核层直接放行、不进 mihomo，更省电（适合国内 IP 列表）', type: 'list', ruleSets: 'ipcidr', limit: 32 },
+        { path: [L, 'fakeip-icmp'], label: 'ping 假地址时回应', summary: '开启后 ping 域名（FakeIP 地址）会立即收到回复，避免一些应用误判断网；本机需选 tc 接管方式或开启共享', type: 'enum', options: [['off', '关闭'], ['reply', '本地应答']], def: 'off' },
+        { path: [L, 'bypass-tun-direct'], label: '与其它 VPN 共存', summary: '其它 VPN 应用的流量不再被接管，两者可同时使用', type: 'bool', def: true },
+        { path: [L, 'local', 'data-plane'], label: '本机接管方式', summary: '本机应用的流量怎样交给 mihomo。不确定就用 cgroup（兼容最好）；需要 ping 通域名时选 tc（内核 5.7+）', type: 'enum', options: [['cgroup', 'cgroup（推荐）'], ['tc', 'tc（需内核 5.7+）']], def: 'cgroup' },
+        { path: [L, 'local', 'ipv6'], label: '本机 IPv6 也走代理', summary: '关闭后本机的 IPv6 连接直接上网', type: 'bool', def: true },
+        { path: [L, 'local', 'bypass-private-address'], label: '局域网地址不走代理', summary: '访问 192.168.x.x 等局域网地址（含 Tailscale 的 100.64.0.0/10）时直接连接', type: 'bool', def: true },
+        { path: [L, 'local', 'bypass-exclude'], label: '例外：这些地址仍走 mihomo', summary: '即使属于局域网地址，这些网段仍交给 mihomo（例如 Tailscale 的 100.64.0.0/10）', type: 'list', item: 'cidr', limit: 256 },
+        { path: [L, 'local', 'bypass-port'], label: '这些端口不走代理', summary: '访问这些目标端口时直接连接', type: 'list', item: 'port', limit: 256 },
+        { path: [L, 'shared', 'data-plane'], label: '共享设备接管方式', summary: '热点、USB 共享设备的流量怎样交给 mihomo。默认 packet_rewrite；热点能上网却不走代理时试试 socket_assign（内核 5.7+）', type: 'enum', options: [['packet_rewrite', 'packet_rewrite（推荐）'], ['socket_assign', 'socket_assign（需内核 5.7+）']], def: 'packet_rewrite' },
+        { path: [L, 'shared', 'dns-mode'], label: '共享设备的 DNS', summary: '接管：设备的域名查询都交给 mihomo（推荐，分流才准）；按规则：由分流规则决定；不处理：设备自己查询', type: 'enum', options: [['hijack', '接管（推荐）'], ['respect_policy', '按规则'], ['off', '不处理']], def: 'hijack' },
+        { path: [L, 'shared', 'ipv6'], label: '共享设备的 IPv6 也走代理', summary: '关闭后共享设备的 IPv6 连接直接上网', type: 'bool', def: true },
+        { path: [L, 'shared', 'bypass-private-address'], label: '局域网地址不走代理', summary: '共享设备访问局域网地址时直接连接', type: 'bool', def: true },
         { path: [L, 'shared', 'include-mac-address'], label: '只代理这些设备（MAC）', summary: '填了以后只有这些设备走代理', type: 'list', item: 'mac', limit: 256 },
         { path: [L, 'shared', 'exclude-mac-address'], label: '不代理这些设备（MAC）', summary: '这些设备的流量不走代理', type: 'list', item: 'mac', limit: 256 },
         { path: [L, 'shared', 'include-source-cidr'], label: '只代理这些来源地址', summary: '填了以后只有这些来源地址走代理', type: 'list', item: 'cidr', limit: 256 },
@@ -869,6 +869,12 @@
       step('dashboard', '配置网页面板', '使用 zashboard，首次访问时自动下载', true, () => {
         doc.set('external-ui', './dashboard');
         if (!data['external-ui-url']) doc.set('external-ui-url', (info.mirror || '') + ZASHBOARD);
+        refresh();
+      });
+    } else if (!data['external-ui-url'] && !data['external-ui-name']) {
+      // 有面板目录但没写下载地址时，内核默认下载 metacubexd；统一改用 zashboard
+      step('dashboard', '面板改用 zashboard', '未指定面板下载地址，内核默认会下载 metacubexd', true, () => {
+        doc.set('external-ui-url', (info.mirror || '') + ZASHBOARD);
         refresh();
       });
     }
