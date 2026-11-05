@@ -31,6 +31,7 @@ return {
 		sections:       { args: { names: [] }, call: wrap((a) => F.sections(a.names)) },
 		interfaces:     { call: wrap(() => SY.interfaces()) },
 		tailscale:      { call: wrap(() => SY.tailscale_status()) },
+		tailscale_logout: { args: { name: '' }, call: wrap((a) => SY.tailscale_logout(a.name)) },
 		apply_status:   { args: { job: '' }, call: wrap((a) => A.job_status(a.job)) },
 		validate:       { args: { content: '' }, call: wrap((a) => A.validate_content(a.content)) },
 		save_raw:       { args: { content: '', rev: '' }, call: wrap((a) => A.begin('raw', a)) },

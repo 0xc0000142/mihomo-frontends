@@ -244,6 +244,20 @@
     { key: ['proxy'], label: '下载经由', type: 'policy', def: 'DIRECT' },
   ];
 
+  // Tailscale 出站（与 LuCI TS_FIELDS 对齐；不提供 advertise-routes：通告路由会让 mihomo -t 真的启动 tsnet）。
+  const TAILSCALE_FIELDS = [
+    { key: ['hostname'], label: '设备名', summary: '在 Tailnet 中显示的名称', type: 'text', required: true, pattern: /^[A-Za-z0-9-]{1,63}$/, hint: '只能包含字母、数字与 -' },
+    { key: ['auth-key'], label: 'Auth key', summary: '留空时用网页登录', type: 'secret' },
+    { key: ['udp'], label: '转发 UDP', type: 'bool', def: false },
+    { key: ['accept-routes'], label: '接受子网路由', type: 'bool', def: false },
+    { key: ['exit-node'], label: '出口节点', summary: '节点名或 IP，留空不使用', type: 'text' },
+  ];
+  const TAILSCALE_NAME = /^[A-Za-z0-9_.-]{1,64}$/;
+
+  function tailscaleList(data) {
+    return (Array.isArray(data.proxies) ? data.proxies : []).filter((item) => isObject(item) && item.type === 'tailscale');
+  }
+
   function ebpfIndex(data) {
     const listeners = Array.isArray(data.listeners) ? data.listeners : [];
     return listeners.findIndex((item) => isObject(item) && item.type === 'ebpf');
@@ -305,8 +319,14 @@
       used: (Array.isArray(data.rules) ? data.rules : []).some((rule) => typeof rule === 'string' && ruleUses(rule, name)),
       fields: RULE_PROVIDER_FIELDS.map((field) => ({ ...fieldState(field, isObject(item) ? item : {}, null, extra), id: field.key.join('.'), path: field.key })),
     }));
-    return { ok: true, sections, providers, ruleProviders, providerFields: PROVIDER_FIELDS.map((field) => fieldState(field, {}, null, extra)),
-      ruleProviderFields: RULE_PROVIDER_FIELDS.map((field) => fieldState(field, {}, null, extra)), summary: summarize(doc, data) };
+    const tailscale = tailscaleList(data).map((item) => ({
+      name: String(item.name || ''), type: 'tailscale', editable: true, stateDir: typeof item['state-dir'] === 'string' ? item['state-dir'] : '',
+      used: !!item['auth-key'],
+      fields: TAILSCALE_FIELDS.map((field) => ({ ...fieldState(field, item, null, extra), id: field.key.join('.'), path: field.key })),
+    }));
+    return { ok: true, sections, providers, ruleProviders, tailscale, providerFields: PROVIDER_FIELDS.map((field) => fieldState(field, {}, null, extra)),
+      ruleProviderFields: RULE_PROVIDER_FIELDS.map((field) => fieldState(field, {}, null, extra)),
+      tailscaleFields: TAILSCALE_FIELDS.map((field) => fieldState(field, {}, null, extra)), summary: summarize(doc, data) };
   }
 
   function ruleUses(rule, name) {
@@ -368,6 +388,7 @@
       const data = plain(doc);
       if (op.op === 'set') applySet(doc, data, op);
       else if (/^(provider|ruleProvider)\.(set|add|delete)$/.test(op.op)) applyCollection(doc, data, op);
+      else if (/^tailscale\.(set|add|delete)$/.test(op.op)) applyTailscale(doc, data, op);
       else throw new Error('不支持的修改：' + op.op);
     }
     const output = dump(doc);
@@ -494,6 +515,94 @@
         }
       },
     });
+  }
+
+  // ---------- Tailscale ----------
+  // add：追加出站，在开头的 DST-PORT 规则（DNS 接管）之后插入 Tailnet 地址段规则，并让 eBPF 不在内核直连这些地址。
+  // delete：同时删掉指向它的规则与策略组成员；没有其它 Tailscale 出站时撤回 bypass-exclude。
+
+  function ruleTarget(rule) {
+    const parts = String(rule).split(',').map((part) => part.trim());
+    while (parts.length > 2 && /^(no-resolve|src)$/i.test(parts[parts.length - 1])) parts.pop();
+    return parts[parts.length - 1];
+  }
+
+  function tailnetRules(name) {
+    return ['IP-CIDR,100.64.0.0/10,' + name + ',no-resolve', 'IP-CIDR6,fd7a:115c:a1e0::/48,' + name + ',no-resolve'];
+  }
+
+  function tailnetExclude(doc, data, present) {
+    const index = ebpfIndex(data);
+    if (index < 0) return;
+    const listener = data.listeners[index];
+    for (const role of ['local', 'shared']) {
+      if (!isObject(listener[role])) continue;
+      const current = Array.isArray(listener[role]['bypass-exclude']) ? listener[role]['bypass-exclude'] : [];
+      const next = present ? current.concat(TAILNET_CIDRS.filter((cidr) => !current.includes(cidr))) : current.filter((cidr) => !TAILNET_CIDRS.includes(cidr));
+      if (next.length === current.length && next.every((value, position) => value === current[position])) continue;
+      const path = ['listeners', index, role, 'bypass-exclude'];
+      if (next.length) setIn(doc, path, next); else deleteIn(doc, path);
+    }
+  }
+
+  function applyTailscale(doc, data, op) {
+    const action = op.op.split('.')[1];
+    const name = String(op.name == null ? '' : op.name).trim();
+    const values = isObject(op.values) ? op.values : {};
+    const existing = tailscaleList(data);
+    if (action === 'add') {
+      if (!TAILSCALE_NAME.test(name)) throw new Error('名称只能包含字母、数字、_ . -，最长 64 个字符');
+      if (policies(data).includes(name) || (isObject(data['proxy-providers']) && name in data['proxy-providers'])) throw new Error('名称已被占用：' + name);
+      if (data.proxies != null && !Array.isArray(data.proxies)) throw new Error('proxies 不是列表，请在配置原文中修改');
+      if (data.rules != null && !Array.isArray(data.rules)) throw new Error('rules 不是列表，请在配置原文中修改');
+      if (!Y.isSeq(doc.get('proxies', true))) doc.set('proxies', doc.createNode([]));
+      const node = doc.createNode({ name, type: 'tailscale', udp: true });
+      node.flow = false;
+      doc.get('proxies', true).add(node);
+      if (!Y.isSeq(doc.get('rules', true))) doc.set('rules', doc.createNode([]));
+      const rules = doc.get('rules', true);
+      let position = 0;
+      while (position < rules.items.length && Y.isScalar(rules.items[position]) && /^DST-PORT\s*,/i.test(String(rules.items[position].value).trim())) position++;
+      rules.items.splice(position, 0, ...tailnetRules(name).map((rule) => doc.createNode(rule)));
+      tailnetExclude(doc, plain(doc), true);
+    } else if (!existing.some((item) => item.name === name)) {
+      throw new Error('Tailscale 出站不存在：' + name);
+    } else if (action === 'delete') {
+      const usesDns = (value) => typeof value === 'string' ? value === 'ts://' + name || value.startsWith('ts://' + name + '#')
+        : Array.isArray(value) ? value.some(usesDns) : isObject(value) ? Object.values(value).some(usesDns) : false;
+      if (usesDns(data.dns)) throw new Error('DNS 仍在使用 ts://' + name + '，请先在配置原文中删除');
+      const proxies = doc.get('proxies', true);
+      proxies.items = proxies.items.filter((node) => !(Y.isMap(node) && node.get('name') === name));
+      const rules = doc.get('rules', true);
+      if (Y.isSeq(rules)) rules.items = rules.items.filter((node) => !(Y.isScalar(node) && ruleTarget(node.value) === name));
+      const seen = new Set();
+      Y.visit(doc, {
+        Pair(_, pair) {
+          if (!Y.isScalar(pair.key) || pair.key.value !== 'proxies' || !Y.isSeq(pair.value) || seen.has(pair.value) || pair.value === proxies) return;
+          seen.add(pair.value);
+          const before = pair.value.items.length;
+          pair.value.items = pair.value.items.filter((item) => !(Y.isScalar(item) && String(item.value) === name));
+          if (before && !pair.value.items.length) throw new Error('有策略组只包含 ' + name + '，请先在配置原文中给它换一个出站');
+        },
+      });
+      if (existing.length === 1) tailnetExclude(doc, plain(doc), false);
+      return;
+    }
+    const index = plain(doc).proxies.findIndex((item) => isObject(item) && item.type === 'tailscale' && item.name === name);
+    for (const field of TAILSCALE_FIELDS) {
+      const id = field.key.join('.');
+      if (!(id in values)) continue;
+      const value = normalizeValue(field, values[id]);
+      const path = ['proxies', index].concat(field.key);
+      if (value === null) {
+        if (field.required) throw new Error(field.label + ' 不能为空');
+        deleteIn(doc, path);
+      } else {
+        if (field.pattern && !field.pattern.test(value)) throw new Error(field.label + field.hint);
+        setIn(doc, path, value);
+      }
+    }
+    if (!plain(doc).proxies[index].hostname) throw new Error('设备名不能为空');
   }
 
   // ---------- 分析 ----------

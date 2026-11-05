@@ -89,3 +89,13 @@ Bugs found and fixed on device:
 - The overview no longer blanks values during refresh, and long core version strings are shortened.
 
 Not covered: real hotspot/USB clients through the shared data plane, IPv6-capable networks, other OEM WebViews, and the wizard's apply step driven by touch (the same calls were exercised through CDP).
+
+## Tailscale web login on HyperOS AVD (2026-11-05)
+
+Same device and core. `config.yaml` and `settings.ini` were backed up to `HyperOS-AVD/tmp/mihomo-test/backup-before-tailscale.tgz` and restored afterwards; the `tailscale/` state directory created by the test was removed and the service was left stopped as before.
+
+- Probe with an isolated core (`/data/local/tmp/tstest`, port 19190, `log-level: warning`, a tailscale outbound without `auth-key`): subscribing to `/logs?level=info` over plain HTTP and then requesting `/proxies/TS/delay` printed `To start this tsnet server, … go to: https://login.tailscale.com/a/…`. Before login `tailscaled.state` contains only `_machinekey`.
+- Through CDP in the real WebView: `tailscale.add` → `validate` (real core) → `apply` with restart → `service start` → `tailscaleLogin` returned a login URL in 4.1 s and `qrCode` a 29×29 matrix. A second `tailscaleLogin` without restart returned no URL (tsnet prints it once), `restart` then `tailscaleLogin` returned a new URL, and `tailscaleLogout` stopped the core, removed the state directory, started it again and a new login URL was available.
+- UI on device: Settings → Tailscale shows the outbound; 网页登录 without a fresh tsnet shows the restart hint, 重启服务后重新获取 shows the QR code and URL, 在浏览器打开 starts `com.android.browser` with the URL.
+
+Not covered: completing a real Tailscale account login (needs the user's account), traffic to Tailnet peers after login, and the LuCI flow on a router (covered by backend tests with the real core and a frontend unit test only).

@@ -650,6 +650,100 @@
     if (payload.skip !== undefined && (!Array.isArray(payload.skip) || payload.skip.some((item) => typeof item !== 'string'))) throw new Error('skip 必须为字符串数组');
   }, (payload) => engine().optimize(payload.content, payload.host || {}, { skip: payload.skip || [] }));
 
+  // ---------- Tailscale ----------
+  // 登录状态来自状态目录里的 tailscaled.state（只解码 _current-profile 与 _profiles，与 LuCI system.uc 一致）。
+
+  // 与 mihomo 一致：缺省为 tailscale，相对路径相对于数据目录；只接受数据目录之内的路径
+  function tailscaleDir(stateDir) {
+    const dir = stateDir || 'tailscale';
+    const full = (dir.startsWith('/') ? dir : DATA + '/' + dir.replace(/^(?:\.\/)+/, '')).replace(/\/+$/, '');
+    if (('/' + full + '/').includes('/../') || ('/' + full + '/').includes('/./') || !full.startsWith(DATA + '/')) return null;
+    return full;
+  }
+
+  function tailscaleProfile(state) {
+    const empty = { loggedIn: false, login: null, tailnet: null, magicDns: null };
+    if (!state || !state.exists || !state.current || !state.profiles) return empty;
+    let current;
+    let profiles;
+    try {
+      current = b64decode(state.current);
+      profiles = JSON.parse(b64decode(state.profiles));
+    } catch (error) {
+      return empty;
+    }
+    if (!profiles || typeof profiles !== 'object') return empty;
+    const profile = Object.entries(profiles).map(([id, item]) => (item && typeof item === 'object' && (item.Key === current || 'profile-' + id === current) ? item : null)).find(Boolean);
+    if (!profile) return empty;
+    return {
+      loggedIn: typeof profile.NodeID === 'string' && profile.NodeID !== '',
+      login: (profile.UserProfile && profile.UserProfile.LoginName) || null,
+      tailnet: (profile.NetworkProfile && profile.NetworkProfile.DomainName) || null,
+      magicDns: (profile.NetworkProfile && profile.NetworkProfile.MagicDNSName) || null,
+    };
+  }
+
+  async function tailscaleEntries() {
+    const read = await operations.configRead.run({});
+    return engine().schema(read.content).tailscale;
+  }
+
+  async function tailscaleEntry(name) {
+    const entry = (await tailscaleEntries()).find((item) => item.name === name);
+    if (!entry) throw new Error('配置中没有名为 ' + name + ' 的 Tailscale 出站');
+    const dir = tailscaleDir(entry.stateDir);
+    if (!dir) throw new Error('state-dir 必须在数据目录之内');
+    return { entry, dir };
+  }
+
+  const tailscaleName = (payload) => {
+    payload.name = text(payload.name, 'name');
+    if (!payload.name || payload.name.length > 128 || /[\r\n]/.test(payload.name)) throw new Error('出站名无效');
+  };
+
+  register('tailscaleStatus', [], noValidation, async () => {
+    const list = [];
+    for (const entry of await tailscaleEntries()) {
+      const dir = tailscaleDir(entry.stateDir);
+      const state = dir ? await shJson(SH + 'tailscale.sh state ' + shq(dir)) : null;
+      list.push({ name: entry.name, stateDir: dir, authKey: entry.used, ...tailscaleProfile(state) });
+    }
+    return { ok: true, list };
+  });
+  register('tailscaleLogin', ['name', 'wait'], (payload) => {
+    tailscaleName(payload);
+    if (payload.wait !== undefined && (!Number.isInteger(payload.wait) || payload.wait < 5 || payload.wait > 60)) throw new Error('wait 必须为 5–60 的整数');
+  }, async (payload) => {
+    await tailscaleEntry(payload.name);
+    const detected = await detectController();
+    const wait = payload.wait || 20;
+    const path = encodeURIComponent(payload.name).replace(/[!'()*]/g, (character) => '%' + character.charCodeAt(0).toString(16).toUpperCase());
+    return shJson('MIHOMO_SECRET=' + shq(detected.secret) + ' ' + SH + 'tailscale.sh login ' +
+      [detected.address, path, JSON.stringify(payload.name).slice(1, -1), String(wait)].map(shq).join(' '), (wait + 20) * 1000);
+  });
+  register('tailscaleLogout', ['name'], tailscaleName, async (payload) => {
+    const { dir } = await tailscaleEntry(payload.name);
+    return shJson(SH + 'tailscale.sh logout ' + shq(dir), 120000);
+  });
+  register('openUrl', ['url'], (payload) => httpUrl(payload.url, 'url'), (payload) => shJson(SH + 'tailscale.sh open ' + shq(payload.url)));
+  register('qrCode', ['text'], (payload) => {
+    text(payload.text, 'text');
+    if (!payload.text || payload.text.length > 1024) throw new Error('二维码内容须为 1–1024 个字符');
+  }, async (payload) => {
+    if (typeof root.qrcode !== 'function') throw new Error('二维码组件未加载，请重新安装完整模块');
+    const code = root.qrcode(0, 'M');
+    code.addData(payload.text, 'Byte');
+    code.make();
+    const size = code.getModuleCount();
+    const rows = [];
+    for (let row = 0; row < size; row++) {
+      let line = '';
+      for (let column = 0; column < size; column++) line += code.isDark(row, column) ? '1' : '0';
+      rows.push(line);
+    }
+    return { ok: true, size, rows };
+  });
+
   root.mihomoBridge = Object.freeze({
     async request(operation, payloadJson = '{}') {
       try {

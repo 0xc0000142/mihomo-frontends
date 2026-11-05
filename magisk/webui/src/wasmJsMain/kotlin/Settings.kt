@@ -485,6 +485,7 @@ fun SettingsPage(onNavigate: (String) -> Unit) {
             }
             group("更多") {
                 ArrowRow("内核配置", "DNS、eBPF、订阅与规则集") { onNavigate("profile") }
+                ArrowRow("Tailscale", "网页登录，访问 Tailnet 里的设备") { onNavigate("tailscale") }
                 ArrowRow("内核管理", "下载、更新与回滚") { onNavigate("core") }
                 ArrowRow("配置文件与备份") { onNavigate("config") }
                 ArrowRow("重新运行向导", "重新检测本机并生成配置") { onNavigate("setup") }

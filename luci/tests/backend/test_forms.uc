@@ -287,6 +287,40 @@ ok(index(fs.readfile(tmp), '# 不要填写 dialer-proxy') >= 0, '保留代理里
 ok(run([{ op: 'tailscale.set', name: 'TS-Server', data: { hostname: 'a b' } }]).error, '拒绝非法主机名');
 ok(run([{ op: 'tailscale.set', name: 'Nope', data: {} }]).error, '拒绝不存在的 Tailscale 代理');
 
+// 新增：追加出站，Tailnet 规则插在开头的 DST-PORT 规则之后；已有 bypass-exclude 时不重复
+r = run([{ op: 'tailscale.add', name: 'TS2', data: { hostname: 'node2' } }]);
+x = X();
+eq([r.error, x.proxies[2]], [null, { name: 'TS2', type: 'tailscale', udp: true, hostname: 'node2' }], 'tailscale.add 追加出站');
+eq(slice(x.rules, 0, 3), ['IP-CIDR,100.64.0.0/10,TS2,no-resolve', 'IP-CIDR6,fd7a:115c:a1e0::/48,TS2,no-resolve', 'IP-CIDR,100.64.0.0/10,TS-Server,no-resolve'], 'Tailnet 规则在最前');
+eq(x.listeners[0].local['bypass-exclude'], ['100.64.0.0/10', 'fd7a:115c:a1e0::/48'], '已有 bypass-exclude 不重复');
+ok(index(fs.readfile(tmp), '  # DNS 劫持\n  - DST-PORT,53,DNS_Hijack') >= 0, '规则注释保留');
+ok(valid(), 'tailscale.add 后 -t 通过');
+const SMALL = 'proxies: []\nrules:\n  - DST-PORT,53,DIRECT\n  - MATCH,DIRECT\nlisteners:\n  - name: e\n    type: ebpf\n    local:\n      data-plane: cgroup\n    shared:\n      interface: [br-lan]\n';
+r = run([{ op: 'tailscale.add', name: 'Tailscale', data: { hostname: 'phone', 'auth-key': 'tskey-x' } }], SMALL);
+x = X();
+eq([r.error, x.rules, x.listeners[0].local['bypass-exclude'], x.listeners[0].shared['bypass-exclude'], x.proxies[0]['auth-key']],
+	[null, ['DST-PORT,53,DIRECT', 'IP-CIDR,100.64.0.0/10,Tailscale,no-resolve', 'IP-CIDR6,fd7a:115c:a1e0::/48,Tailscale,no-resolve', 'MATCH,DIRECT'],
+	['100.64.0.0/10', 'fd7a:115c:a1e0::/48'], ['100.64.0.0/10', 'fd7a:115c:a1e0::/48'], 'tskey-x'], 'tailscale.add：DNS 接管规则仍在最前，eBPF 强制 Tailnet 进核心');
+ok(run([{ op: 'tailscale.add', name: 'TS-Server', data: { hostname: 'x' } }]).error, '拒绝重名');
+ok(run([{ op: 'tailscale.add', name: 'a b', data: { hostname: 'x' } }]).error, '拒绝非法名称');
+ok(run([{ op: 'tailscale.add', name: 'TS3', data: { hostname: 'bad_host' } }]).error, '拒绝非法主机名');
+ok(run([{ op: 'tailscale.add', name: 'TS3', data: {} }]).error, '主机名必填');
+
+// 删除：DNS 仍引用时拒绝；否则删掉规则、策略组成员，最后一个时撤回 bypass-exclude
+r = run([{ op: 'tailscale.delete', name: 'TS-Server' }]);
+ok(r.error && index(r.error, 'ts://TS-Server') >= 0, 'DNS 引用时拒绝删除', r.error);
+const NODNS = replace(FIXTURE, '    +.tail.ts.net:\n      - ts://TS-Server\n', '');
+ok(NODNS != FIXTURE, '去掉 DNS 引用的样例');
+r = run([{ op: 'tailscale.delete', name: 'TS-Server' }], NODNS);
+x = X();
+eq([r.error, map(x.proxies, (p) => p.name), length(filter(x.rules, (v) => index(v, 'TS-Server') >= 0)), x['proxy-groups'][0].proxies],
+	[null, ['DNS_Hijack'], 0, ['全部节点', '自动选择', '香港', 'DIRECT']], 'tailscale.delete');
+eq([x.listeners[0].local['bypass-exclude'], x.listeners[0].shared['bypass-exclude']], [null, null], '最后一个 Tailscale 删除后撤回 bypass-exclude');
+ok(valid(), 'tailscale.delete 后 -t 通过');
+ok(run([{ op: 'tailscale.delete', name: 'Nope' }]).error, '拒绝删除不存在的出站');
+const ONLY = replace(NODNS, 'proxies: [全部节点, 自动选择, 香港, TS-Server, DIRECT]', 'proxies: [TS-Server]');
+ok(index(run([{ op: 'tailscale.delete', name: 'TS-Server' }], ONLY).error ?? '', '只包含') >= 0, '策略组只剩它时拒绝删除');
+
 /* ---------- 其他 ---------- */
 
 r = run([{ op: 'basic.set', data: { 'log-level': 'info' } }, { op: 'mode.set', mode: 'global' }]);

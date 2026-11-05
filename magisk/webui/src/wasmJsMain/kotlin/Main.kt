@@ -158,7 +158,7 @@ fun AppIcon(packageName: String, label: String, modifier: Modifier = Modifier, l
 private val tabs = listOf("home" to "首页", "proxies" to "代理", "settings" to "设置")
 
 /** 子页面（压栈显示，带返回）。 */
-private val subPages = setOf("connections", "profile", "core", "config", "backups", "logs", "setup")
+private val subPages = setOf("connections", "profile", "core", "config", "backups", "logs", "setup", "tailscale")
 
 private class Navigator {
     var tab by mutableStateOf("home")
@@ -241,6 +241,7 @@ private fun AppShell(navigator: Navigator) {
                     "config" -> ConfigPage(onBack = back, onNavigate = navigator::go)
                     "backups" -> BackupsPage(onBack = back)
                     "logs" -> LogsPage(onBack = back)
+                    "tailscale" -> TailscalePage(onBack = back)
                     "setup" -> SetupWizard(firstRun = false) { navigator.back(); LiveOverview.invalidate(); ProfileState.invalidate() }
                 }
             }

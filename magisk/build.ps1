@@ -83,7 +83,7 @@ if (-not (Test-Path -LiteralPath $webDist -PathType Container)) {
     throw "缺少 WebUI 产物：$webDist；请先构建 wasmJsBrowserDistribution"
 }
 $webFiles = @(Get-PackageFiles $webDist)
-foreach ($name in @('index.html', 'mihomo.js', 'bootstrap.js', 'backend.js', 'config.js', 'vendor/yaml.min.js', 'vendor/YAML-LICENSE.txt', 'template.yaml', 'FONT-LICENSE.txt')) {
+foreach ($name in @('index.html', 'mihomo.js', 'bootstrap.js', 'backend.js', 'config.js', 'vendor/yaml.min.js', 'vendor/YAML-LICENSE.txt', 'vendor/qrcode.js', 'vendor/QRCODE-LICENSE.txt', 'template.yaml', 'FONT-LICENSE.txt')) {
     $required = Get-Item -LiteralPath (Join-Path $webDist $name) -Force
     if ($required.PSIsContainer -or $required.Length -eq 0) { throw "WebUI 产物缺失或为空：$name" }
 }

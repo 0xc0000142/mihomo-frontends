@@ -409,28 +409,37 @@ return view.extend({
 		panel.replaceChildren();
 		if (!Array.isArray(list)) return this.unsupported(panel, (list && list.reason) || '无法读取');
 		if (!list.length) {
-			panel.appendChild(mui.card('', mui.empty('配置中没有 type: tailscale 的代理。')));
+			panel.appendChild(mui.card('', mui.empty('配置中没有 type: tailscale 的代理。添加后，访问 Tailnet 地址（100.64.0.0/10）的流量会走 Tailscale；不填 auth key 时用浏览器登录账号即可。',
+				mui.btn('添加 Tailscale', () => this.tsAdd(), 'cbi-button-add'))));
 			return;
 		}
 		return Promise.all(list.map((t, i) => {
 			const st = this.tsStatus.find(x => x.name === t.name) || {};
 			const box = E('div', {});
+			const actions = [
+				st.logged_in
+					? mui.btn('退出登录', () => this.tsLogout(t.name), 'cbi-button-negative')
+					: mui.btn('网页登录', () => this.tsLogin(t.name), 'cbi-button-action'),
+				' ', mui.btn('删除', () => this.tsDelete(t.name), 'cbi-button-remove')
+			];
 			panel.appendChild(mui.card('Tailscale：' + t.name, [
 				E('div', { 'class': 'mh-ts-status' }, [
-					mui.row('登录状态', st.logged_in ? E('span', { 'class': 'mh-ok' }, '已登录') : E('span', { 'class': 'mh-warn' }, '未登录（填写 auth-key 后保存，或查看日志中的登录链接）')),
+					mui.row('登录状态', st.logged_in ? E('span', { 'class': 'mh-ok' }, '已登录')
+						: E('span', { 'class': 'mh-warn' }, t['auth-key'] ? '未登录（已填写 auth key，服务启动并有流量时自动登录）' : '未登录')),
 					st.login ? mui.row('账号', st.login) : '',
 					st.tailnet ? mui.row('Tailnet', st.tailnet) : '',
 					st.magic_dns ? mui.row('MagicDNS', st.magic_dns) : '',
 					mui.row('状态目录', st.state_dir || '-')
 				]),
+				E('div', { 'class': 'mh-toolbar', style: 'margin:8px 0' }, actions),
 				box,
-				E('p', { 'class': 'mh-note' }, '名称不能在这里修改：规则、策略组与 ts://' + t.name + ' 都按名称引用它。已登录时修改 auth-key 不会切换账号。')
-			]));
+				E('p', { 'class': 'mh-note' }, '名称不能在这里修改：规则、策略组与 ts://' + t.name + ' 都按名称引用它。已登录时修改 auth-key 不会切换账号，要换账号请先退出登录。')
+			], { tools: i === 0 ? [ mui.btn('添加', () => this.tsAdd(), 'mh-btn-sm cbi-button-add') ] : null }));
 			return this.mount(box, 'ts' + i, 'tailscale', 'ts' + i, t, s => {
 				let o;
 				o = s.option(form.Value, 'hostname', '主机名', '在 Tailnet 中显示的名称');
 				o.validate = (sid, v) => (!v || /^[A-Za-z0-9-]{1,63}$/.test(v)) ? true : '只能包含字母、数字与 -';
-				o = s.option(form.Value, 'auth-key', 'Auth key');
+				o = s.option(form.Value, 'auth-key', 'Auth key', '留空时用「网页登录」');
 				o.password = true;
 				o = s.option(form.Flag, 'udp', '转发 UDP');
 				o = s.option(form.Flag, 'accept-routes', '接受子网路由');
@@ -441,6 +450,132 @@ return view.extend({
 				o.datatype = 'range(0,65535)';
 			}, { name: t.name });
 		}));
+	},
+
+	// 新增：写入出站与 Tailnet 规则（配置任务会在服务运行时重启），不填 auth key 时接着网页登录
+	tsAdd() {
+		const name = E('input', { 'class': 'cbi-input-text', value: 'Tailscale' });
+		const host = E('input', { 'class': 'cbi-input-text', value: 'openwrt-mihomo' });
+		const key = E('input', { 'class': 'cbi-input-password', type: 'password', placeholder: '可选，留空用网页登录' });
+		const err = E('p', { 'class': 'mh-warn' });
+		const submit = () => {
+			const n = name.value.trim(), h = host.value.trim(), k = key.value.trim();
+			if (!/^[A-Za-z0-9_.-]{1,64}$/.test(n)) return (err.textContent = '名称只能包含字母、数字、_ . -');
+			if (!/^[A-Za-z0-9-]{1,63}$/.test(h)) return (err.textContent = '主机名只能包含字母、数字与 -');
+			if (/\s/.test(k)) return (err.textContent = 'auth key 不能含空格');
+			const data = { hostname: h };
+			if (k) data['auth-key'] = k;
+			mui.runJob(api.rpc.patch([ { op: 'tailscale.add', name: n, data: data } ], this.rev), { quiet: true }).then(s => {
+				if (s.state !== 'done') return;
+				return this.reload().then(() => {
+					if (!k) this.tsLogin(n);
+					else mui.notify('已添加 ' + n + '，tsnet 会用 auth key 自动登录');
+				});
+			});
+		};
+		ui.showModal('添加 Tailscale', [
+			mui.field('名称', name, '规则与策略组按这个名称引用它'),
+			mui.field('主机名', host, '在 Tailnet 中显示的名称'),
+			mui.field('Auth key', key),
+			E('p', { 'class': 'mh-note' }, '会在 DNS 接管规则之后加入 100.64.0.0/10 与 fd7a:115c:a1e0::/48 两条规则，并让 eBPF 不把这两个网段当作私网放行。'),
+			err,
+			E('div', { 'class': 'right' }, [
+				E('button', { 'class': 'btn', 'click': () => ui.hideModal() }, '取消'), ' ',
+				E('button', { 'class': 'btn cbi-button-positive', 'click': submit }, '添加')
+			])
+		]);
+	},
+
+	tsDelete(name) {
+		mui.confirm('删除 ' + name, '同时删除指向它的规则与策略组成员；登录状态目录保留，重新添加时会继续使用。', '删除', true).then(yes => {
+			if (!yes) return;
+			return mui.runJob(api.rpc.patch([ { op: 'tailscale.delete', name: name } ], this.rev)).then(s => {
+				if (s.state === 'done' || s.state === 'rolled_back') return this.reload();
+			});
+		});
+	},
+
+	tsLogout(name) {
+		mui.confirm('退出登录', '删除 ' + name + ' 的登录状态并重启服务，设备会从 Tailnet 中离线，之后需要重新登录。', '退出登录', true).then(yes => {
+			if (!yes) return;
+			return api.rpc.tailscaleLogout(name).then(r => {
+				if (!r || !r.ok) throw new Error((r && r.error) || '退出登录失败');
+				mui.notify('已退出登录');
+				return this.reload();
+			}).catch(e => mui.notify(e.message, 'error'));
+		});
+	},
+
+	// 网页登录：订阅控制器日志（有订阅者时内核会输出 info 日志），再对出站测速唤醒 tsnet，从日志取登录链接；
+	// 之后轮询状态文件直到登录成功。tsnet 已在运行而没有新链接时，提供重启服务后重试。
+	tsLogin(name, restart) {
+		const msg = E('p', {}, restart ? '正在重启服务…' : '正在获取登录链接…');
+		const link = E('div', {});
+		const retry = E('div', {});
+		const timers = [];
+		let stream = null, closed = false, url = null;
+		const close = () => {
+			closed = true;
+			if (stream) stream.close();
+			timers.forEach(t => clearTimeout(t));
+		};
+		const later = (fn, ms) => timers.push(setTimeout(() => { if (!closed) fn(); }, ms));
+		ui.showModal('登录 Tailscale：' + name, [ msg, link, retry,
+			E('div', { 'class': 'right' }, [ E('button', { 'class': 'btn', 'click': () => { close(); ui.hideModal(); this.reload(); } }, '关闭') ]) ]);
+		const fail = text => {
+			if (stream) stream.close();
+			msg.textContent = text;
+			retry.replaceChildren(mui.btn('重启服务后重新获取', () => { close(); this.tsLogin(name, true); }, 'cbi-button-action'));
+		};
+		const poll = () => api.rpc.tailscale().then(r => {
+			const st = ((r && r.ok && r.list) || []).find(x => x.name === name);
+			if (st && st.logged_in) {
+				close();
+				ui.hideModal();
+				mui.notify('Tailscale 已登录' + (st.login ? '：' + st.login : ''));
+				return this.reload();
+			}
+			later(poll, 3000);
+		}, () => later(poll, 3000));
+		const copy = () => (navigator.clipboard && window.isSecureContext)
+			? navigator.clipboard.writeText(url).then(() => mui.notify('已复制'), () => mui.notify('复制失败，请手动复制', 'error'))
+			: mui.notify('当前页面不能使用剪贴板，请手动复制链接', 'error');
+		const prefix = '[Tailscale](' + name + ') ';
+		const begin = () => {
+			stream = api.stream('/logs?level=info', d => {
+				const p = d && d.payload;
+				if (closed || typeof p !== 'string' || p.indexOf(prefix) !== 0) return;
+				const m = /go to: (https?:\/\/[^\s"]+)/.exec(p);
+				if (m && !url) {
+					url = m[1];
+					msg.textContent = '在新标签页里登录 Tailscale 账号并授权这台设备，完成后这里会自动更新。';
+					link.replaceChildren(
+						E('p', {}, E('a', { href: url, target: '_blank', rel: 'noopener noreferrer', style: 'word-break:break-all' }, url)),
+						E('div', { 'class': 'mh-toolbar' }, [
+							mui.btn('在新标签页打开', () => window.open(url, '_blank', 'noopener'), 'cbi-button-action'), ' ',
+							mui.btn('复制链接', copy)
+						]));
+					retry.replaceChildren();
+					later(poll, 3000);
+				} else if (/AuthLoop: state is Running/.test(p)) poll();
+			});
+			// 订阅建立后再唤醒 tsnet：它只在第一次连接时启动，登录链接只输出一次
+			later(() => api.get('/proxies/' + encodeURIComponent(name) + '/delay?url=' + encodeURIComponent('http://100.100.100.100') + '&timeout=8000',
+				{ timeout: 12000 }).catch(() => null), 1000);
+			later(() => {
+				if (url) return;
+				poll();
+				fail('没有拿到登录链接：tsnet 可能已经在运行。重启服务后再获取一次。');
+			}, 12000);
+		};
+		const ready = restart ? api.rpc.service('restart')
+			: api.rpc.status().then(s => (s && s.running) ? { ok: true } : api.rpc.service('start'));
+		Promise.resolve(ready).then(r => {
+			if (closed) return;
+			if (r && r.ok === false) return fail('服务启动失败：' + (r.error || ''));
+			msg.textContent = '正在获取登录链接…';
+			return api.controller(true).then(c => (c && c.base) ? begin() : fail('浏览器无法连接控制器：' + ((c && c.reason) || '')));
+		}, e => fail(e.message));
 	},
 
 	/* ---------- 保存 ---------- */

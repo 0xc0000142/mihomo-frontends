@@ -291,3 +291,64 @@ test('optimize expands legacy listener keys and keeps Tailnet traffic inside mih
   assert.equal(C.optimize(result.content, { ipv6: true }).changes.some((item) => item.id === 'ebpf'), false, 'idempotent');
   assert.match(policyRender(result.content), /mode: hybrid/);
 });
+
+test('tailscale add inserts the proxy, Tailnet rules after DNS hijack and eBPF bypass-exclude', () => {
+  const result = C.patch(rendered, [{ op: 'tailscale.add', name: 'Tailscale', values: { hostname: 'phone-node' } }]);
+  const data = plain(result.content);
+  const proxy = data.proxies.find((item) => item.name === 'Tailscale');
+  assert.deepEqual([proxy.type, proxy.hostname, proxy.udp, proxy['auth-key']], ['tailscale', 'phone-node', true, undefined]);
+  assert.match(data.rules[0], /^DST-PORT,53,/);
+  const first = data.rules.findIndex((rule) => rule.includes('Tailscale'));
+  assert.ok(data.rules.slice(0, first).every((rule) => /^DST-PORT,/.test(rule)), 'Tailnet rules follow the leading DST-PORT rules');
+  assert.deepEqual(data.rules.slice(first, first + 2), ['IP-CIDR,100.64.0.0/10,Tailscale,no-resolve', 'IP-CIDR6,fd7a:115c:a1e0::/48,Tailscale,no-resolve']);
+  for (const role of ['local', 'shared']) assert.deepEqual(data.listeners[0][role]['bypass-exclude'], ['100.64.0.0/10', 'fd7a:115c:a1e0::/48']);
+  assert.equal(C.optimize(result.content, { ipv6: true, memMb: 12000 }).changes.some((change) => change.id === 'ebpf'), false, 'optimizer accepts the result');
+  assert.match(policyRender(result.content), /mode: hybrid/);
+  const schema = C.schema(result.content);
+  assert.equal(JSON.stringify(schema.tailscale.map((item) => [item.name, item.stateDir])), '[["Tailscale",""]]');
+  assert.equal(schema.tailscale[0].fields.find((field) => field.id === 'hostname').value, 'phone-node');
+});
+
+test('tailscale add rejects bad names, duplicates and hostnames', () => {
+  assert.throws(() => C.patch(rendered, [{ op: 'tailscale.add', name: 'a b', values: { hostname: 'x' } }]), /名称/);
+  assert.throws(() => C.patch(rendered, [{ op: 'tailscale.add', name: '节点选择', values: { hostname: 'x' } }]), /名称/);
+  assert.throws(() => C.patch(rendered, [{ op: 'tailscale.add', name: 'DIRECT', values: { hostname: 'x' } }]), /已被占用/);
+  assert.throws(() => C.patch(rendered, [{ op: 'tailscale.add', name: 'TS', values: { hostname: 'bad_host' } }]), /设备名只能/);
+  assert.throws(() => C.patch(rendered, [{ op: 'tailscale.add', name: 'TS', values: {} }]), /设备名不能为空/);
+});
+
+test('tailscale set edits fields; delete removes rules, group members and bypass-exclude', () => {
+  const config = [
+    'proxies:',
+    '  - {name: TS, type: tailscale, hostname: old, auth-key: tskey-test}',
+    'proxy-groups:',
+    '  - {name: 选择, type: select, proxies: [TS, DIRECT]}',
+    'rules:',
+    '  - DST-PORT,53,DIRECT',
+    '  - IP-CIDR,100.64.0.0/10,TS,no-resolve',
+    '  - IP-CIDR6,fd7a:115c:a1e0::/48,TS,no-resolve',
+    '  - DOMAIN,ts.example,TS',
+    '  - MATCH,DIRECT',
+    'listeners:',
+    '  - name: ebpf-in',
+    '    type: ebpf',
+    '    local:',
+    '      bypass-exclude: [10.0.0.0/8, 100.64.0.0/10, fd7a:115c:a1e0::/48]',
+    '    shared:',
+    '      bypass-exclude: [100.64.0.0/10, fd7a:115c:a1e0::/48]',
+    '',
+  ].join('\n');
+  const edited = plain(C.patch(config, [{ op: 'tailscale.set', name: 'TS', values: { hostname: 'new-node', 'auth-key': '', 'accept-routes': true } }]).content);
+  assert.deepEqual([edited.proxies[0].hostname, edited.proxies[0]['auth-key'], edited.proxies[0]['accept-routes']], ['new-node', undefined, true]);
+  assert.throws(() => C.patch(config, [{ op: 'tailscale.set', name: 'Nope', values: {} }]), /不存在/);
+  const removed = plain(C.patch(config, [{ op: 'tailscale.delete', name: 'TS' }]).content);
+  assert.deepEqual(removed.proxies, []);
+  assert.deepEqual(removed.rules, ['DST-PORT,53,DIRECT', 'MATCH,DIRECT']);
+  assert.deepEqual(removed['proxy-groups'][0].proxies, ['DIRECT']);
+  assert.deepEqual(removed.listeners[0].local['bypass-exclude'], ['10.0.0.0/8']);
+  assert.equal(removed.listeners[0].shared['bypass-exclude'], undefined);
+  const lonely = config.replace('proxies: [TS, DIRECT]', 'proxies: [TS]');
+  assert.throws(() => C.patch(lonely, [{ op: 'tailscale.delete', name: 'TS' }]), /只包含 TS/);
+  const dnsUse = config.replace('proxy-groups:', 'dns:\n  nameserver-policy:\n    +.tail.ts.net: [ts://TS]\nproxy-groups:');
+  assert.throws(() => C.patch(dnsUse, [{ op: 'tailscale.delete', name: 'TS' }]), /ts:\/\/TS/);
+});

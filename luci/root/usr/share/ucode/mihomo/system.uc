@@ -217,4 +217,29 @@ function tailscale_status() {
 	return { ok: true, list: list };
 }
 
-export { logs, merge_devices, devices, merge_interfaces, interfaces, ts_profile, ts_dir, tailscale_status };
+// 退出登录：删除状态目录。服务运行时先停止（否则 tsnet 退出时会把登录状态写回），删除后再启动。
+function tailscale_logout(name) {
+	if (type(name) != 'string' || name == '')
+		return { ok: false, error: '名称无效' };
+	let t = filter(Y.query(P.CONFIG, TS_EXPR) ?? [], (t) => t.name == name)[0];
+	if (!t)
+		return { ok: false, error: 'Tailscale 代理不存在：' + name };
+	let dir = ts_dir(t.dir);
+	if (!dir)
+		return { ok: false, error: 'state-dir 必须在配置目录之内' };
+	let was = system(U.shq(P.INIT) + ' running >/dev/null 2>&1') == 0;
+	if (was) {
+		let r = U.run(U.shq(P.INIT) + ' stop');
+		if (r.code != 0)
+			return { ok: false, error: '停止服务失败', detail: U.tail_lines(r.out, 20) };
+	}
+	let removed = U.rm_tree(dir);
+	if (was) {
+		let r = U.run(U.shq(P.INIT) + ' start');
+		if (r.code != 0)
+			return { ok: false, error: '已删除登录状态，但启动服务失败', detail: U.tail_lines(r.out, 20) };
+	}
+	return removed ? { ok: true, restarted: was } : { ok: false, error: '删除状态目录失败：' + dir };
+}
+
+export { logs, merge_devices, devices, merge_interfaces, interfaces, ts_profile, ts_dir, tailscale_status, tailscale_logout };

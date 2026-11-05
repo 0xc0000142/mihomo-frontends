@@ -1210,6 +1210,144 @@ function op_tailscale_set(op, ctx) {
 	return map_edits(['proxies', i], ctx.x.proxies[i], arr(ctx.raw.proxies)[i]?.keys ?? [], vals);
 }
 
+// 新增：追加出站（不填 auth-key 时由「网页登录」完成授权），在开头的 DST-PORT 规则（DNS 接管）之后插入 Tailnet 规则，
+// 并让 eBPF 不把 Tailnet 地址当作私网放行。删除：同时删掉指向它的规则与策略组成员，最后一个时撤回 bypass-exclude。
+const TAILNET = ['100.64.0.0/10', 'fd7a:115c:a1e0::/48'];
+const TS_NAME = /^[A-Za-z0-9_.-]{1,64}$/;
+
+function rule_target(rule) {
+	let parts = map(split(rule, ','), (s) => trim(s));
+	while (length(parts) > 2 && match(lc(parts[length(parts) - 1]), /^(no-resolve|src)$/))
+		pop(parts);
+	return parts[length(parts) - 1];
+}
+
+// 每个策略组的 proxies 列表（显式或经合并键继承自锚点），按路径去重
+function proxies_lists(ctx) {
+	let groups = arr(ctx.x['proxy-groups']), raws = arr(ctx.raw.groups), anchors = anchor_index(ctx), out = [], seen = {};
+	for (let i, g in groups) {
+		let r = raws[i] ?? { keys: [] }, path = null;
+		if (has(r.keys, 'proxies'))
+			path = ['proxy-groups', i, 'proxies'];
+		else if (has(r.keys, '<<') && r.merge && anchors[r.merge] && has(anchors[r.merge].keys, 'proxies'))
+			path = [...anchors[r.merge].path, 'proxies'];
+		let key = sprintf('%J', path);
+		if (path && !seen[key]) {
+			seen[key] = true;
+			push(out, { path: path, names: arr(obj(g).proxies) });
+		}
+	}
+	return out;
+}
+
+function tailnet_edits(ctx, present) {
+	let li = ebpf_index(ctx.x), edits = [];
+	if (li < 0)
+		return edits;
+	let l = ctx.x.listeners[li];
+	for (let role in ['local', 'shared']) {
+		if (type(l[role]) != 'object')
+			continue;
+		let cur = arr(l[role]['bypass-exclude']), next = [];
+		if (present) {
+			next = [...cur];
+			for (let c in TAILNET)
+				if (!has(next, c))
+					push(next, c);
+		} else
+			next = filter(cur, (c) => !has(TAILNET, c));
+		if (same(next, cur))
+			continue;
+		let p = ['listeners', li, role, 'bypass-exclude'];
+		push(edits, length(next) ? { t: 'set', p: p, v: next } : { t: 'del', p: p });
+	}
+	return edits;
+}
+
+function op_tailscale_add(op, ctx) {
+	let x = ctx.x, name = op.name;
+	if (type(name) != 'string' || !match(name, TS_NAME))
+		return fail('名称只能包含字母、数字、_ . -，最长 64 个字符');
+	if (has(policies(x), name) || name in obj(x['proxy-providers']))
+		return fail('名称已被占用：' + name);
+	if (x.proxies != null && type(x.proxies) != 'array')
+		return fail('proxies 不是列表，请在配置文件页编辑');
+	if (x.rules != null && type(x.rules) != 'array')
+		return fail('rules 不是列表，请在配置文件页编辑');
+	let r = pick_fields(obj(op.data), TS_SPEC, 'Tailscale ');
+	if (r.error)
+		return r;
+	if (!r.vals.hostname)
+		return fail('主机名不能为空：只能包含字母、数字与 -');
+	let def = { name: name, type: 'tailscale', udp: true };
+	for (let k, v in r.vals)
+		if (v != null && !(type(v) == 'array' && !length(v)) && !(k == 'listen-port' && v === 0))
+			def[k] = v;
+	let edits = [(type(x.proxies) == 'array') ? { t: 'append', p: ['proxies'], v: def } : { t: 'set', p: ['proxies'], v: [def] }];
+	let rules = arr(x.rules), pos = 0;
+	while (pos < length(rules) && type(rules[pos]) == 'string' && match(rules[pos], /^[ \t]*DST-PORT[ \t]*,/))
+		pos++;
+	let add = [{ v: 'IP-CIDR,100.64.0.0/10,' + name + ',no-resolve' }, { v: 'IP-CIDR6,fd7a:115c:a1e0::/48,' + name + ',no-resolve' }];
+	if (x.rules == null)
+		push(edits, { t: 'set', p: ['rules'], v: map(add, (it) => it.v) });
+	else {
+		let items = [];
+		for (let i = 0; i < length(rules); i++) {
+			if (i == pos)
+				push(items, ...add);
+			push(items, { k: i });
+		}
+		if (pos >= length(rules))
+			push(items, ...add);
+		push(edits, { t: 'list', p: ['rules'], v: items });
+	}
+	push(edits, ...tailnet_edits(ctx, true));
+	return { edits: edits };
+}
+
+// DNS 中以 ts://名称 引用该出站的服务器（nameserver、nameserver-policy 等任意位置）
+function dns_uses(v, name) {
+	if (type(v) == 'string')
+		return v == 'ts://' + name || substr(v, 0, length(name) + 6) == 'ts://' + name + '#';
+	if (type(v) == 'array')
+		return length(filter(v, (e) => dns_uses(e, name))) > 0;
+	if (type(v) == 'object') {
+		for (let k, e in v)
+			if (dns_uses(e, name))
+				return true;
+	}
+	return false;
+}
+
+function op_tailscale_delete(op, ctx) {
+	let x = ctx.x, i = ts_index(x, op.name);
+	if (i < 0)
+		return fail('Tailscale 代理不存在：' + (op.name ?? ''));
+	if (dns_uses(x.dns, op.name))
+		return fail('DNS 仍在使用 ts://' + op.name + '，请先在 DNS 标签页删除');
+	let edits = [{ t: 'del', p: ['proxies', i] }];
+	let rules = arr(x.rules), keep = [];
+	for (let k, rule in rules)
+		if (!(type(rule) == 'string' && rule_target(rule) == op.name))
+			push(keep, { k: k });
+	if (length(keep) != length(rules))
+		push(edits, { t: 'list', p: ['rules'], v: keep });
+	for (let l in proxies_lists(ctx)) {
+		let hits = [];
+		for (let j = length(l.names) - 1; j >= 0; j--)
+			if (l.names[j] == op.name)
+				push(hits, j);
+		if (length(hits) && length(hits) == length(l.names))
+			return fail('有策略组只包含 ' + op.name + '，请先在策略组页给它换一个出站');
+		for (let j in hits)
+			push(edits, { t: 'del', p: [...l.path, j] });
+	}
+	let left = filter(arr(x.proxies), (p) => obj(p).type == 'tailscale');
+	if (length(left) == 1)
+		push(edits, ...tailnet_edits(ctx, false));
+	return { edits: edits };
+}
+
 const OPS = {
 	'mode.set': op_mode_set,
 	'provider.set': op_provider_set,
@@ -1225,7 +1363,9 @@ const OPS = {
 	'rule_provider.delete': op_rule_provider_delete,
 	'basic.set': op_basic_set,
 	'dns.set': op_dns_set,
-	'tailscale.set': op_tailscale_set
+	'tailscale.set': op_tailscale_set,
+	'tailscale.add': op_tailscale_add,
+	'tailscale.delete': op_tailscale_delete
 };
 
 function run_pre(list) {

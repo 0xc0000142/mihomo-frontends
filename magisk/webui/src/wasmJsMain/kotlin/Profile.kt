@@ -58,7 +58,7 @@ internal data class ConfigField(
 internal data class ConfigSection(val id: String, val title: String, val summary: String, val available: Boolean, val fields: List<ConfigField>)
 internal data class ConfigItem(val name: String, val type: String, val editable: Boolean, val used: Boolean, val fields: List<ConfigField>)
 
-private fun JsonObject.field(): ConfigField = ConfigField(
+internal fun JsonObject.field(): ConfigField = ConfigField(
     id = string("id"),
     path = (this["path"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }.orEmpty(),
     label = string("label"),

@@ -1168,3 +1168,90 @@ test('appIcon XHR open or send exceptions clear timers and event handlers', asyn
     assertCleanXHR(bridge, request);
   }
 });
+
+// ---------- Tailscale ----------
+
+function tailscaleGlobals() {
+  const realm = { crypto: webcrypto };
+  realm.globalThis = realm;
+  vm.createContext(realm);
+  for (const file of ['vendor/yaml.min.js', 'config.js', 'vendor/qrcode.js']) {
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '../webui/bridge', file), 'utf8'), realm);
+  }
+  return { mihomoConfig: realm.mihomoConfig, qrcode: realm.qrcode };
+}
+
+const tailscaleConfig = [
+  'external-controller: 127.0.0.1:9090',
+  'secret: "test-secret"',
+  'proxies:',
+  '  - {name: TS-A, type: tailscale, hostname: a, auth-key: tskey-test}',
+  '  - {name: "TS B", type: tailscale, hostname: b, state-dir: ./ts-b}',
+  '  - {name: Bad, type: tailscale, hostname: c, state-dir: /etc/ts}',
+  'rules:',
+  '  - MATCH,DIRECT',
+  '',
+].join('\n');
+
+function tailscaleBridge(handler) {
+  return makeBridge({
+    globals: tailscaleGlobals(),
+    handler(command) {
+      if (command.startsWith('base64 -w 0 ')) return result(Buffer.from(tailscaleConfig).toString('base64'));
+      return handler ? handler(command) : undefined;
+    },
+  });
+}
+
+test('tailscaleStatus decodes only the login profile and resolves state-dir inside the data directory', async () => {
+  const profiles = { dea8: { ID: 'dea8', Key: 'profile-dea8', NodeID: 'nX1', UserProfile: { LoginName: 'user@example.com' },
+    NetworkProfile: { DomainName: 'example.ts.net', MagicDNSName: 'tail0000.ts.net' } } };
+  const state = { ok: true, exists: true, current: Buffer.from('profile-dea8').toString('base64'), profiles: Buffer.from(JSON.stringify(profiles)).toString('base64') };
+  const bridge = tailscaleBridge((command) => {
+    if (command === scriptRoot + "tailscale.sh state '/data/adb/mihomo/tailscale'") return jsonResult(state);
+    if (command === scriptRoot + "tailscale.sh state '/data/adb/mihomo/ts-b'") return jsonResult({ ok: true, exists: false });
+    return undefined;
+  });
+  const response = await bridge.request('tailscaleStatus');
+  assert.equal(response.ok, true, response.error);
+  assert.deepEqual(JSON.parse(JSON.stringify(response.list)), [
+    { name: 'TS-A', stateDir: '/data/adb/mihomo/tailscale', authKey: true, loggedIn: true, login: 'user@example.com', tailnet: 'example.ts.net', magicDns: 'tail0000.ts.net' },
+    { name: 'TS B', stateDir: '/data/adb/mihomo/ts-b', authKey: false, loggedIn: false, login: null, tailnet: null, magicDns: null },
+    { name: 'Bad', stateDir: null, authKey: false, loggedIn: false, login: null, tailnet: null, magicDns: null },
+  ]);
+  assert.ok(!bridge.commands.some((command) => command.includes('/etc/ts')), 'state-dir outside the data directory is never read');
+});
+
+test('tailscaleLogin passes the controller secret by environment and returns the login URL', async () => {
+  const bridge = tailscaleBridge((command) => (command.includes('tailscale.sh login') ? jsonResult({ ok: true, url: 'https://login.tailscale.com/a/abc123' }) : undefined));
+  const response = await bridge.request('tailscaleLogin', { name: 'TS B', wait: 15 });
+  assert.equal(response.ok, true, response.error);
+  assert.equal(response.url, 'https://login.tailscale.com/a/abc123');
+  const command = bridge.commands.find((item) => item.includes('tailscale.sh login'));
+  assert.equal(command, "MIHOMO_SECRET='test-secret' " + scriptRoot + "tailscale.sh login 'http://127.0.0.1:9090' 'TS%20B' 'TS B' '15'");
+  assert.equal((await bridge.request('tailscaleLogin', { name: 'Nope' })).ok, false);
+  assert.equal((await bridge.request('tailscaleLogin', { name: 'TS-A', wait: 600 })).ok, false);
+});
+
+test('tailscaleLogout refuses state directories outside the data directory', async () => {
+  const bridge = tailscaleBridge();
+  const bad = await bridge.request('tailscaleLogout', { name: 'Bad' });
+  assert.equal(bad.ok, false);
+  assert.match(bad.error, /数据目录/);
+  assert.equal((await bridge.request('tailscaleLogout', { name: 'TS-A' })).ok, true);
+  assert.ok(bridge.commands.includes(scriptRoot + "tailscale.sh logout '/data/adb/mihomo/tailscale'"));
+});
+
+test('openUrl only accepts http(s) and qrCode returns a square module matrix', async () => {
+  const bridge = tailscaleBridge();
+  assert.equal((await bridge.request('openUrl', { url: 'javascript:alert(1)' })).ok, false);
+  assert.equal((await bridge.request('openUrl', { url: 'https://login.tailscale.com/a/abc' })).ok, true);
+  assert.ok(bridge.commands.includes(scriptRoot + "tailscale.sh open 'https://login.tailscale.com/a/abc'"));
+  const qr = await bridge.request('qrCode', { text: 'https://login.tailscale.com/a/abc123' });
+  assert.equal(qr.ok, true, qr.error);
+  assert.ok(qr.size >= 21);
+  assert.equal(qr.rows.length, qr.size);
+  assert.ok(qr.rows.every((row) => row.length === qr.size && /^[01]+$/.test(row)));
+  assert.equal(qr.rows[0].slice(0, 7), '1111111', 'finder pattern');
+  assert.equal((await bridge.request('qrCode', { text: '' })).ok, false);
+});

@@ -1,5 +1,6 @@
 'use strict';
 
+import * as fs from 'fs';
 import * as SY from 'mihomo.system';
 import * as P from 'mihomo.paths';
 import * as U from 'mihomo.util';
@@ -24,12 +25,12 @@ let neigh = [
 ];
 
 let list = SY.merge_devices(leases, statics, neigh);
-eq(map(list, (d) => d.mac), ['aa:aa:aa:aa:aa:aa', 'AA:BB:CC:DD:EE:02', 'aa:bb:cc:dd:ee:01', 'aa:bb:cc:dd:ee:03'],
+eq(map(list, (d) => d.mac), ['aa:aa:aa:aa:aa:aa', 'aa:bb:cc:dd:ee:02', 'aa:bb:cc:dd:ee:01', 'aa:bb:cc:dd:ee:03'],
 	'按名称排序，无名称的排最后；FAILED、INCOMPLETE 与无 MAC 的邻居被忽略');
 let pc = filter(list, (d) => d.mac == 'aa:bb:cc:dd:ee:01')[0];
 eq([pc.name, pc.ip4, pc.ip6, pc.dev, pc.online], ['W10-PC', '192.168.77.138', ['2409:8d50::1', 'fe80::1'], 'br-lan', true],
 	'租约与邻居按 MAC 合并（MAC 转小写）');
-let usb = filter(list, (d) => d.mac == 'AA:BB:CC:DD:EE:02')[0];
+let usb = filter(list, (d) => d.mac == 'aa:bb:cc:dd:ee:02')[0];
 eq([usb.name, usb.ip4, usb.online], ['usb-host', '192.168.77.200', false], '静态分配的名称优先，租约名 * 视为无名称');
 let anon = filter(list, (d) => d.mac == 'aa:bb:cc:dd:ee:03')[0];
 eq([anon.name, anon.ip4, anon.online], [null, '192.168.77.190', true], '只在邻居表中的设备');
@@ -102,5 +103,16 @@ eq(r, { ok: true, list: [
 	{ name: 'TS-B', state_dir: P.HOME + '/tailscale', logged_in: false, login: null, tailnet: null, magic_dns: null }
 ] }, 'tailscale_status 列出每个 tailscale 代理');
 ok(index(sprintf('%J', r), 'privkey') < 0, 'tailscale_status 不含密钥');
+
+// 退出登录：只删配置目录之内的状态目录；本机测试没有 init 脚本（服务视为未运行），路由器上不重启真实服务，只测失败分支
+eq(SY.tailscale_logout('').ok, false, '退出登录：名称不能为空');
+eq(SY.tailscale_logout('Nope').ok, false, '退出登录：出站必须存在');
+U.write_file(P.CONFIG, 'proxies:\n  - {name: TS-A, type: tailscale, state-dir: ts-a}\n  - {name: TS-X, type: tailscale, state-dir: /tmp/ts-x}\n');
+r = SY.tailscale_logout('TS-X');
+ok(!r.ok && index(r.error, '配置目录') >= 0, '退出登录：拒绝配置目录之外的 state-dir', r);
+if (getenv('MIHOMO_TEST_LOCAL')) {
+	r = SY.tailscale_logout('TS-A');
+	eq([r, fs.stat(P.HOME + '/ts-a')], [{ ok: true, restarted: false }, null], '退出登录：删除状态目录');
+}
 
 done();

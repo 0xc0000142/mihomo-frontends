@@ -27,6 +27,7 @@ const rpcs = {
 	sections: declare('sections', ['names']),
 	interfaces: declare('interfaces'),
 	tailscale: declare('tailscale'),
+	tailscaleLogout: declare('tailscale_logout', ['name']),
 	applyStatus: declare('apply_status', ['job']),
 	validate: declare('validate', ['content']),
 	saveRaw: declare('save_raw', ['content', 'rev']),

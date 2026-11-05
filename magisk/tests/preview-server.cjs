@@ -35,6 +35,7 @@ function mockBackend() {
     { name: '自动选择', type: 'URLTest', now: '香港 02', all: ['香港 01', '香港 02', '日本 01', '美国 01'] },
   ];
   const delays = { '香港 01': 82, '香港 02': 64, '日本 01': 121, '美国 01': 233, DIRECT: 6 };
+  const tsLogged = {};
   window.mihomoBridge = { request: async (operation, raw = '{}') => {
     const payload = JSON.parse(raw);
     await sleep(60);
@@ -69,6 +70,24 @@ function mockBackend() {
       case 'configAnalyze': result = window.mihomoConfig.analyze(payload.content); break;
       case 'configPatch': result = window.mihomoConfig.patch(payload.content, payload.ops); break;
       case 'configOptimize': result = window.mihomoConfig.optimize(payload.content, payload.host || {}, { skip: payload.skip || [] }); break;
+      case 'tailscaleStatus': result = { ok: true, list: window.mihomoConfig.schema(config).tailscale.map((item) => ({
+        name: item.name, stateDir: '/data/adb/mihomo/tailscale', authKey: item.used, loggedIn: !!tsLogged[item.name],
+        login: tsLogged[item.name] ? 'user@example.com' : null, tailnet: tsLogged[item.name] ? 'example.ts.net' : null,
+        magicDns: tsLogged[item.name] ? 'tail0000.ts.net' : null })) }; break;
+      case 'tailscaleLogin': await sleep(1500); setTimeout(() => { tsLogged[payload.name] = true; }, 8000);
+        result = { ok: true, url: 'https://login.tailscale.com/a/1a2b3c4d5e6f70' }; break;
+      case 'tailscaleLogout': delete tsLogged[payload.name]; break;
+      case 'openUrl': break;
+      case 'qrCode': {
+        const code = window.qrcode(0, 'M');
+        code.addData(payload.text, 'Byte');
+        code.make();
+        const size = code.getModuleCount();
+        const rows = [];
+        for (let r = 0; r < size; r++) { let line = ''; for (let c = 0; c < size; c++) line += code.isDark(r, c) ? '1' : '0'; rows.push(line); }
+        result = { ok: true, size, rows };
+        break;
+      }
       case 'backupRead': result = { ok: true, content: config }; break;
       case 'coreRollback': case 'backupRestore': case 'backupDel': break;
       case 'backups': result = { ok: true, backups: [{ name: 'config-20261104-2210.yaml', size: 13312, time: 1730729400 }] }; break;
