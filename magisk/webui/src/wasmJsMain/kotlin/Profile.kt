@@ -255,7 +255,7 @@ fun ProfilePage(onBack: () -> Unit) {
                         Caption("配置里没有 eBPF 入站，请在向导中执行「本机优化」后再编辑。", Tone.warning)
                     } else {
                         val shown = if (opened == section.id || section.fields.size <= 6) section.fields else section.fields.take(5)
-                        for (field in shown) FieldRow(field, state.value(field)) { editing = field }
+                        for (field in shown) ConfigFieldRow(field, state.value(field)) { editing = field }
                         if (shown.size < section.fields.size) {
                             ArrowRow("更多选项", value = "${section.fields.size - shown.size} 项") { opened = section.id }
                         }
@@ -308,7 +308,7 @@ internal fun SaveDialog(show: Boolean, onDismiss: () -> Unit, onSave: (Boolean) 
 }
 
 @Composable
-private fun FieldRow(field: ConfigField, value: JsonElement, onEdit: () -> Unit) {
+internal fun ConfigFieldRow(field: ConfigField, value: JsonElement, onEdit: () -> Unit) {
     val state = ProfileState
     val edited = field.id in state.edits
     val title = if (edited) "${field.label} ·" else field.label

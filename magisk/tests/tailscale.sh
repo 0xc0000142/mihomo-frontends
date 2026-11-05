@@ -33,12 +33,13 @@ cat >"$TEST_DIR/bin/curl" <<'EOF'
 for arg in "$@"; do
   case "$arg" in
     Authorization:*) echo "$arg" >>"$TEST_DIR/curl.auth" ;;
-    */logs\?level=info) cat "$TEST_DIR/stream"; sleep 30; exit 0 ;;
-    */delay\?*) echo "$arg" >>"$TEST_DIR/curl.delay"; exit 0 ;;
+    # 与真实内核一样，登录日志在测速唤醒 tsnet 之后才出现
+    */logs\?level=info) n=0; while [ ! -f "$TEST_DIR/curl.delay.done" ] && [ "$n" -lt 50 ]; do sleep 0.1; n=$((n+1)); done; cat "$TEST_DIR/stream"; sleep 30; exit 0 ;;
+    */delay\?*) echo "$arg" >>"$TEST_DIR/curl.delay"; touch "$TEST_DIR/curl.delay.done"; exit 0 ;;
   esac
 done
 EOF
-chmod +x "$TEST_DIR/bin/curl"
+chmod +x "$TEST_DIR/bin/curl" "$SCRIPTS/mihomo.sh"
 
 # ---------- state ----------
 ts state "$D/tailscale"

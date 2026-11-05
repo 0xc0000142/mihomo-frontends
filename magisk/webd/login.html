@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mihomo 登录</title>
+<style>
+  :root { --bg: #f7f7f7; --card: #fff; --text: #1a1a1a; --muted: #8a8a8a; --primary: #3482ff; --danger: #e5484d; --line: #e6e6e6; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #000; --card: #1c1c1e; --text: #f2f2f2; --muted: #9a9a9a; --primary: #4a90ff; --danger: #ff6369; --line: #2c2c2e; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 16px;
+    background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, -apple-system, "PingFang SC", "Noto Sans SC", sans-serif; }
+  main { width: 100%; max-width: 360px; background: var(--card); border-radius: 20px; padding: 28px 24px; }
+  h1 { margin: 0 0 4px; font-size: 22px; }
+  p { margin: 0 0 20px; color: var(--muted); font-size: 14px; }
+  input { width: 100%; padding: 14px 16px; border-radius: 14px; border: 1px solid var(--line); background: transparent;
+    color: var(--text); font-size: 16px; outline: none; }
+  input:focus { border-color: var(--primary); }
+  button { width: 100%; margin-top: 16px; padding: 14px; border: 0; border-radius: 14px; background: var(--primary);
+    color: #fff; font-size: 16px; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: .6; cursor: default; }
+  #error { min-height: 20px; margin-top: 12px; color: var(--danger); font-size: 14px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>mihomo</h1>
+  <p>输入模块网页管理密码</p>
+  <form id="form">
+    <input id="password" type="password" autocomplete="current-password" placeholder="密码" required autofocus>
+    <button id="submit" type="submit">登录</button>
+    <div id="error" role="alert"></div>
+  </form>
+</main>
+<script>
+  const form = document.getElementById('form');
+  const button = document.getElementById('submit');
+  const error = document.getElementById('error');
+  function next() {
+    const value = new URLSearchParams(location.search).get('next') || '/';
+    // 只跳回本站路径
+    return value.startsWith('/') && !value.startsWith('//') ? value : '/';
+  }
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    button.disabled = true;
+    error.textContent = '';
+    try {
+      const response = await fetch('/api/login', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', 'X-Mihomo-Request': '1' },
+        body: JSON.stringify({ password: document.getElementById('password').value }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (response.ok && body.ok) { location.replace(next()); return; }
+      error.textContent = body.error || ('登录失败（HTTP ' + response.status + '）');
+    } catch (failure) {
+      error.textContent = '无法连接：' + failure.message;
+    } finally {
+      button.disabled = false;
+    }
+  });
+</script>
+</body>
+</html>

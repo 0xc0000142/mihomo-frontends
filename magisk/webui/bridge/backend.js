@@ -57,7 +57,7 @@
     if (encoded.length <= MAX_CONFIG_BASE64) return { inline: encoded };
     if (new TextEncoder().encode(content).length > MAX_CONFIG_BYTES) throw new Error('配置超过 4 MB，无法写入');
     for (let index = 0, offset = 0; offset < encoded.length; index++, offset += STAGE_CHUNK) {
-      await shJson(SH + 'host.sh stage ' + index + ' ' + shq(encoded.slice(offset, offset + STAGE_CHUNK)), 30000);
+      await shJson('host.sh', ['stage', String(index), encoded.slice(offset, offset + STAGE_CHUNK)], 30000);
     }
     return { staged: true };
   }
@@ -83,7 +83,22 @@
       });
       timer = setTimeout(() => finish({ errno: -1, stdout: '', stderr: '回调超时；命令可能仍在执行，请刷新确认实际状态，勿重复提交' }), timeout);
       try {
-        if (!root.ksu || typeof root.ksu.exec !== 'function') throw new Error('请在 KernelSU/Magisk WebUI 中打开');
+        if (!root.ksu || (typeof root.ksu.spawn !== 'function' && typeof root.ksu.exec !== 'function')) throw new Error('请在 KernelSU/Magisk WebUI 中打开');
+        // KernelSU 的 ksu.exec 在 JS 接口方法里同步执行命令，期间页面主线程（也是界面渲染线程）被阻塞；
+        // ksu.spawn 只同步创建 shell，命令在后台执行，按行回传输出，界面不会因轮询而卡顿。
+        if (typeof root.ksu.spawn === 'function') {
+          const out = [];
+          const err = [];
+          root[callbackName] = {
+            stdout: { emit: (event, data) => { if (event === 'data') out.push(String(data)); } },
+            stderr: { emit: (event, data) => { if (event === 'data') err.push(String(data)); } },
+            emit: (event, code) => {
+              if (event === 'exit') finish({ errno: Number.isFinite(Number(code)) ? Number(code) : -1, stdout: out.join('\n'), stderr: err.join('\n') });
+            },
+          };
+          root.ksu.spawn(command, '[]', '{}', callbackName);
+          return;
+        }
         root.ksu.exec(command, '{}', callbackName);
       } catch (error) {
         finish({ errno: -1, stdout: '', stderr: 'ksu.exec 不可用：' + error.message });
@@ -91,12 +106,58 @@
     });
   }
 
+  // 网页管理（mihomo-webd）：没有 ksu 时经同源 api/run 调用脚本子命令；只允许 SCRIPTS 中的脚本，不执行任意 shell。
+  const SCRIPTS = ['apply.sh', 'backup.sh', 'core.sh', 'discovery.sh', 'host.sh', 'mihomo.sh', 'onboarding.sh', 'policy.sh', 'tailscale.sh', 'webui.sh'];
+  const ENV_NAMES = ['MIHOMO_SECRET'];
+
+  function remoteMode() {
+    return !root.ksu && !!root.location && /^https?:$/.test(root.location.protocol);
+  }
+
+  async function remoteRun(script, args, timeout, env) {
+    const abort = typeof AbortController === 'function' ? new AbortController() : null;
+    const timer = setTimeout(() => abort && abort.abort(), timeout + 5000);
+    try {
+      const response = await root.fetch('api/run', {
+        method: 'POST', credentials: 'same-origin', signal: abort ? abort.signal : undefined,
+        headers: { 'Content-Type': 'application/json', 'X-Mihomo-Request': '1' },
+        body: JSON.stringify({ script, args, env, timeout }),
+      });
+      if (response.status === 401) {
+        root.location.href = 'login?next=' + encodeURIComponent(root.location.pathname + root.location.hash);
+        return { errno: -1, stdout: '', stderr: '登录已失效，请重新登录' };
+      }
+      const body = await response.json().catch(() => null);
+      if (!body || typeof body !== 'object') return { errno: -1, stdout: '', stderr: '网页服务 HTTP ' + response.status };
+      if (!response.ok) return { errno: -1, stdout: '', stderr: String(body.error || ('网页服务 HTTP ' + response.status)) };
+      return { errno: Number(body.errno), stdout: String(body.stdout || ''), stderr: String(body.stderr || '') };
+    } catch (error) {
+      return { errno: -1, stdout: '', stderr: abort && abort.signal.aborted ? '请求超时；命令可能仍在执行，请刷新确认实际状态，勿重复提交' : '网页服务不可达：' + error.message };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // 调用模块脚本子命令：script 为 SCRIPTS 之一，args 为字符串参数，env 只允许 ENV_NAMES。
+  function run(script, args = [], timeout = 30000, env = {}) {
+    if (!SCRIPTS.includes(script)) return Promise.resolve({ errno: -1, stdout: '', stderr: '不允许的脚本：' + script });
+    for (const name of Object.keys(env)) {
+      if (!ENV_NAMES.includes(name)) return Promise.resolve({ errno: -1, stdout: '', stderr: '不允许的环境变量：' + name });
+    }
+    const list = args.map(String);
+    if (remoteMode()) return remoteRun(script, list, timeout, env);
+    const prefix = Object.entries(env).map(([name, value]) => name + '=' + shq(value) + ' ').join('');
+    // 子命令（首个参数）是固定的小写单词，不加引号，便于在日志里辨认
+    const words = list.map((arg, index) => (index === 0 && /^[a-z][a-z_-]*$/.test(arg) ? arg : shq(arg)));
+    return exec(prefix + SH + script + words.map((word) => ' ' + word).join(''), timeout);
+  }
+
   root.addEventListener('pagehide', () => {
     for (const finish of callbacks.values()) finish({ errno: -1, stdout: '', stderr: '页面已关闭，操作结果未知' });
   });
 
-  async function shJson(command, timeout) {
-    const result = await exec(command, timeout);
+  async function shJson(script, args, timeout, env) {
+    const result = await run(script, args, timeout, env);
     let data;
     try {
       data = JSON.parse(result.stdout.trim());
@@ -119,12 +180,12 @@
   }
 
   async function readStatus(prefix) {
-    try { return await shJson(SH + 'mihomo.sh status'); }
+    try { return await shJson('mihomo.sh', ['status']); }
     catch (error) { throw new Error(prefix + error.message); }
   }
 
   async function service(action) {
-    const result = await exec(SH + 'mihomo.sh ' + action, 120000);
+    const result = await run('mihomo.sh', [action], 120000);
     if (result.errno !== 0) throw new Error(result.stderr.trim() || result.stdout.trim() || ('服务操作失败（退出码 ' + result.errno + '）'));
     const status = await readStatus('操作已返回，但无法确认服务状态：');
     if (action !== 'stop' && isSSIDPaused(status)) return { ok: true, paused: true, message: ssidPauseMessage(status) };
@@ -134,9 +195,9 @@
   }
 
   async function apply(content, restart) {
+    controllerCache = null;
     const staged = await stageConfig(content);
-    const source = staged.inline ? shq(staged.inline) : '--staged';
-    const result = await shJson(SH + 'apply.sh ' + source + (restart ? ' restart' : ''), 120000);
+    const result = await shJson('apply.sh', [staged.inline || '--staged'].concat(restart ? ['restart'] : []), 120000);
     if (!restart) return result;
     const status = await readStatus('配置已保存，但无法确认服务状态：');
     if (isSSIDPaused(status)) return { ...result, paused: true, message: ssidPauseMessage(status) };
@@ -162,15 +223,17 @@
   }
 
   async function detectController() {
-    const result = await exec('grep -E "^(external-controller|secret):" ' + shq(CONFIG) + ' 2>/dev/null');
+    const result = await run('host.sh', ['controller']);
     if (result.errno !== 0 && result.errno !== 1) throw new Error(result.stderr || '读取控制器配置失败');
     let address = null;
     let secret = '';
+    let ui = '';
     for (const line of result.stdout.split('\n')) {
-      const match = /^(external-controller|secret):\s*(.*)$/.exec(line);
+      const match = /^(external-controller|secret|external-ui):\s*(.*)$/.exec(line);
       if (!match) continue;
       if (match[1] === 'external-controller') address = yamlScalar(match[2]);
-      else secret = yamlScalar(match[2]);
+      else if (match[1] === 'secret') secret = yamlScalar(match[2]);
+      else ui = yamlScalar(match[2]);
     }
     if (!address) throw new Error('配置中没有 external-controller');
     if (!/^(?:\[[\da-fA-F:]+\]|[\w.*-]*):\d{1,5}$/.test(address)) throw new Error('external-controller 地址无效');
@@ -178,32 +241,79 @@
     if (port < 1 || port > 65535) throw new Error('external-controller 端口无效');
     address = address.replace(/^(?:0\.0\.0\.0|\[::\]|\*|)(?=:)/, '127.0.0.1');
     if (/[\r\n\0]/.test(secret)) throw new Error('控制器密钥不能包含换行');
-    return { address: 'http://' + address, secret };
+    return { address: 'http://' + address, secret, ui };
   }
 
-  async function controller(payload) {
-    const detected = await detectController();
-    const args = ['--disable', '--silent', '--show-error', '--globoff', '--noproxy', '*',
-      '--connect-timeout', '3', '--max-time', '8', '--request', payload.method || 'GET',
-      '--header', 'Authorization: Bearer ' + detected.secret,
-      '--write-out', '\n__MIHOMO_HTTP__:%{http_code}'];
-    if (payload.body !== undefined) {
-      args.push('--header', 'Content-Type: application/json', '--data-binary', typeof payload.body === 'string' ? payload.body : JSON.stringify(payload.body));
-    }
-    args.push('--url', detected.address + payload.path);
-    const command = '(if [ -x /system/bin/curl ]; then curl_bin=/system/bin/curl; else curl_bin=$(command -v curl 2>/dev/null); fi; ' +
-      'if [ -z "$curl_bin" ] || [ ! -x "$curl_bin" ]; then printf \'%s\\n\' \'未找到可执行的 curl：/system/bin/curl 不可用，PATH 中也未找到；请安装 curl 模块\' >&2; exit 127; fi; ' +
-      '"$curl_bin" ' + args.map(shq).join(' ') + ')';
-    const result = await exec(command, 15000);
-    if (result.errno !== 0) throw new Error('控制器 curl 失败：' + (result.stderr || ('退出码 ' + result.errno + '')));
-    const match = /\n__MIHOMO_HTTP__:(\d{3})\s*$/.exec(result.stdout);
-    if (!match) throw new Error('控制器响应缺少 HTTP 状态码');
-    const status = Number(match[1]);
-    const body = result.stdout.slice(0, match.index).trim();
+  // 控制器地址与密钥缓存一小段时间：轮询时不必每次都读配置（每次读都要起一个 shell）
+  const CONTROLLER_TTL = 15000;
+  let controllerCache = null;
+
+  async function cachedController() {
+    const now = Date.now();
+    if (controllerCache && now - controllerCache.at < CONTROLLER_TTL) return controllerCache.value;
+    const value = await detectController();
+    controllerCache = { value, at: now };
+    return value;
+  }
+
+  // 先由页面直接请求本机控制器（mihomo 默认允许跨域与私网访问），失败时再经 curl；
+  // 直连失败而脚本成功时，两分钟内不再尝试直连。网页管理下经同源 /clash/ 反向代理访问。
+  let directBlockedUntil = 0;
+
+  function controllerResult(status, body) {
     if (status < 200 || status >= 300) throw new Error('控制器 HTTP ' + status + (body ? '：' + body.slice(0, 200) : ''));
     if (status === 204 || !body) return { ok: true, data: null };
     try { return { ok: true, data: JSON.parse(body) }; }
     catch (error) { throw new Error('控制器响应不是 JSON'); }
+  }
+
+  async function controllerFetch(base, detected, payload) {
+    const abort = typeof AbortController === 'function' ? new AbortController() : null;
+    const timer = setTimeout(() => abort && abort.abort(), 10000);
+    try {
+      const headers = { Authorization: 'Bearer ' + detected.secret };
+      const init = { method: payload.method || 'GET', headers, credentials: 'omit', cache: 'no-store', signal: abort ? abort.signal : undefined };
+      if (payload.body !== undefined) {
+        headers['Content-Type'] = 'application/json';
+        init.body = typeof payload.body === 'string' ? payload.body : JSON.stringify(payload.body);
+      }
+      const response = await root.fetch(base + payload.path, init);
+      if (!response || typeof response.status !== 'number' || typeof response.text !== 'function') throw new Error('无效响应');
+      // 网页服务的登录失效等错误不是控制器的响应，交给脚本通道处理
+      if (response.status === 401 && remoteMode()) throw new Error('网页服务 401');
+      return { status: response.status, body: String(await response.text()).trim() };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function controller(payload) {
+    const detected = await cachedController();
+    let direct = null;
+    if (Date.now() >= directBlockedUntil && typeof root.fetch === 'function') {
+      try {
+        direct = await controllerFetch(remoteMode() ? root.location.origin + '/clash' : detected.address, detected, payload);
+      } catch (error) {
+        direct = null; // 被拦截、连不上或超时：改经脚本，脚本成功说明直连不可用
+      }
+    }
+    if (direct) {
+      if (direct.status === 401) controllerCache = null;
+      return controllerResult(direct.status, direct.body);
+    }
+    const viaScript = await controllerScript(detected, payload);
+    directBlockedUntil = Date.now() + 120000;
+    return viaScript;
+  }
+
+  async function controllerScript(detected, payload) {
+    const args = [payload.method || 'GET', detected.address + payload.path];
+    if (payload.body !== undefined) args.push(typeof payload.body === 'string' ? payload.body : JSON.stringify(payload.body));
+    const result = await run('host.sh', ['api'].concat(args), 15000, { MIHOMO_SECRET: detected.secret });
+    if (result.errno !== 0) throw new Error('控制器 curl 失败：' + (result.stderr || ('退出码 ' + result.errno + '')));
+    const match = /\n__MIHOMO_HTTP__:(\d{3})\s*$/.exec(result.stdout);
+    if (!match) throw new Error('控制器响应缺少 HTTP 状态码');
+    return controllerResult(Number(match[1]), result.stdout.slice(0, match.index).trim());
   }
 
   function renderTemplate(template, payload) {
@@ -346,7 +456,7 @@
         return { ok: true, apps: await normalizeApps(packages.map((packageName) => infos.get(packageName) || { packageName }), providers), source: 'kernelsu' };
       } catch (error) {}
     }
-    const discovered = await shJson(SH + 'discovery.sh apps');
+    const discovered = await shJson('discovery.sh', ['apps']);
     if (!Array.isArray(discovered.apps)) throw new Error('应用列表不是 JSON 数组');
     return { ok: true, apps: await normalizeApps(discovered.apps, providers), source: 'package-manager' };
   }
@@ -450,6 +560,79 @@
     return { ok: true, packageName, icon: await icons.get(packageName) };
   }
 
+  // ---------- 策略组图标 ----------
+  // 先由浏览器直接下载（多数图标站允许跨域），失败时由模块脚本下载；结果缓存在 localStorage。
+  const ICON_LIMIT = 262144;
+  const ICON_CACHE_PREFIX = 'mihomo.icon:';
+  const proxyIcons = new Map();
+
+  function iconMime(bytes) {
+    if (bytes[0] === 0x89 && bytes[1] === 0x50) return 'image/png';
+    if (bytes[0] === 0xff && bytes[1] === 0xd8) return 'image/jpeg';
+    if (bytes[0] === 0x47 && bytes[1] === 0x49) return 'image/gif';
+    if (bytes[0] === 0x52 && bytes[8] === 0x57) return 'image/webp';
+    const head = new TextDecoder().decode(bytes.subarray(0, 512)).trimStart();
+    if (/^(<\?xml|<svg|<!--)/i.test(head) && /<svg/i.test(new TextDecoder().decode(bytes.subarray(0, 4096)))) return 'image/svg+xml';
+    return '';
+  }
+
+  function iconCache(url, value) {
+    try {
+      const storage = root.localStorage;
+      if (!storage) return '';
+      if (value === undefined) return storage.getItem(ICON_CACHE_PREFIX + url) || '';
+      storage.setItem(ICON_CACHE_PREFIX + url, value);
+    } catch (error) {
+      // 存储已满或被禁用时只用内存缓存
+    }
+    return '';
+  }
+
+  async function downloadIcon(url) {
+    try {
+      const response = await root.fetch(url, { mode: 'cors', credentials: 'omit' });
+      if (response.ok) {
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        if (bytes.length && bytes.length <= ICON_LIMIT) return bytes;
+      }
+    } catch (error) {
+      // 跨域或网络失败，改由模块下载
+    }
+    const result = await run('host.sh', ['icon', url], 20000);
+    if (result.errno !== 0) throw new Error(result.stderr.trim() || '下载图标失败');
+    return b64bytes(result.stdout);
+  }
+
+  function b64bytes(value) {
+    const binary = atob(value.replace(/\s/g, ''));
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+    return bytes;
+  }
+
+  async function readProxyIcon(url) {
+    if (url.startsWith('data:')) return url;
+    const cached = iconCache(url);
+    if (cached) return cached;
+    const bytes = await downloadIcon(url);
+    const mime = iconMime(bytes);
+    if (!mime) throw new Error('不是图片');
+    const icon = 'data:' + mime + ';base64,' + bytesBase64(bytes);
+    iconCache(url, icon);
+    return icon;
+  }
+
+  async function proxyIcon(url) {
+    if (!proxyIcons.has(url)) {
+      const pending = readProxyIcon(url).catch((error) => {
+        proxyIcons.delete(url);
+        throw error;
+      });
+      proxyIcons.set(url, pending);
+    }
+    return { ok: true, icon: await proxyIcons.get(url) };
+  }
+
   function assertObject(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('参数必须是 JSON 对象');
   }
@@ -511,7 +694,7 @@
 
   function validController(payload) {
     text(payload.path, 'path');
-    if (!/^\/(?:version|proxies|connections)(?:[/?]|$)/.test(payload.path) || /[\x00-\x20\x7f#\\]/.test(payload.path)) throw new Error('不支持的控制器接口（不读取流接口）');
+    if (!/^\/(?:version|proxies|connections|group\/[^/?]+\/delay)(?:[/?]|$)/.test(payload.path) || /[\x00-\x20\x7f#\\]/.test(payload.path)) throw new Error('不支持的控制器接口（不读取流接口）');
     const pathname = payload.path.split('?')[0];
     let decoded;
     try { decoded = decodeURIComponent(pathname); }
@@ -562,11 +745,11 @@
     ['backups', 'backup.sh list'], ['policyGet', 'policy.sh get'],
     ['discoveryInterfaces', 'discovery.sh interfaces', 15000],
     ['onboardingState', 'onboarding.sh get'], ['onboardingComplete', 'onboarding.sh complete'],
-  ]) register(name, [], noValidation, () => shJson(SH + command, timeout));
+  ]) register(name, [], noValidation, () => shJson(command.split(' ')[0], command.split(' ').slice(1), timeout));
 
   register('service', ['action'], (payload) => oneOf(payload.action, ['start', 'stop', 'restart'], '服务操作'), (payload) => service(payload.action));
   register('coreInfo', [], noValidation, async () => {
-    const info = await shJson(SH + 'core.sh info');
+    const info = await shJson('core.sh', ['info']);
     return { ...info, installed: info.installed === true, version: String(info.version || ''), can_rollback: info.can_rollback === true || info.can_rollback === 'yes' };
   });
   register('coreSet', ['repo', 'tag', 'mirror'], (payload) => {
@@ -576,26 +759,24 @@
     }
     if (payload.repo && !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(payload.repo)) throw new Error('仓库格式须为 owner/repo');
     httpUrl(payload.mirror, 'mirror', true);
-  }, (payload) => shJson(SH + 'core.sh settings ' + [payload.repo, payload.tag, payload.mirror].map((value) => shq(value || '-')).join(' ')));
+  }, (payload) => shJson('core.sh', ['settings'].concat([payload.repo, payload.tag, payload.mirror].map((value) => value || '-'))));
   register('configRead', [], noValidation, async () => {
-    const result = await exec('base64 -w 0 ' + shq(CONFIG) + ' 2>/dev/null || base64 ' + shq(CONFIG) + ' | tr -d "\\n"');
+    const result = await run('host.sh', ['read-config']);
     if (result.errno !== 0 || !result.stdout.trim()) throw new Error(result.stderr || '读取配置失败（文件不存在？）');
     return { ok: true, content: b64decode(result.stdout) };
   });
   register('validate', ['content'], (payload) => text(payload.content, 'content'), async (payload) => {
     const staged = await stageConfig(payload.content);
-    const input = staged.inline ? 'printf %s ' + shq(staged.inline) + ' | base64 -d' : 'base64 -d < ' + shq(DATA + '/run/stage.b64');
-    const cleanup = staged.inline ? '' : ' rm -f ' + shq(DATA + '/run/stage.b64') + ';';
-    const result = await exec('(tmp=$(mktemp) || exit 1; trap \'rm -f "$tmp";' + cleanup + '\' EXIT; ' + input + ' > "$tmp" && /data/adb/mihomo/mihomo -d ' + shq(DATA) + ' -f "$tmp" -t)', 120000);
+    const result = await run('host.sh', ['validate', staged.inline || '--staged'], 120000);
     if (result.errno !== 0) throw new Error((result.stderr || result.stdout || '校验失败').trim().split('\n').slice(-5).join('\n'));
     return { ok: true };
   });
   register('apply', ['content', 'restart'], (payload) => { text(payload.content, 'content'); boolean(payload.restart, 'restart', true); }, (payload) => apply(payload.content, payload.restart));
   for (const [name, command] of [['backupDel', 'delete'], ['backupRestore', 'restore']]) {
-    register(name, ['name'], (payload) => validBackup(payload.name), (payload) => shJson(SH + 'backup.sh ' + command + ' ' + shq(payload.name)));
+    register(name, ['name'], (payload) => validBackup(payload.name), (payload) => shJson('backup.sh', [command, payload.name]));
   }
   register('backupRead', ['name'], (payload) => validBackup(payload.name), async (payload) => {
-    const result = await exec(SH + 'backup.sh read ' + shq(payload.name));
+    const result = await run('backup.sh', ['read', payload.name]);
     if (result.errno !== 0 || !result.stdout.trim() || result.stdout.trim().startsWith('{')) {
       let message = result.stderr || '读取备份失败';
       try { message = JSON.parse(result.stdout).error || message; } catch (error) {}
@@ -606,17 +787,21 @@
   register('logs', ['lines'], (payload) => {
     if (payload.lines !== undefined && (!Number.isInteger(payload.lines) || payload.lines < 1 || payload.lines > 10000)) throw new Error('lines 必须为 1–10000 的整数');
   }, async (payload) => {
-    const result = await exec('tail -n ' + (payload.lines || 200) + ' ' + shq(DATA + '/run/mihomo.log') + ' 2>/dev/null; logcat -d -s mihomo:* 2>/dev/null | tail -n 50');
+    const result = await run('host.sh', ['logs', String(payload.lines || 200)]);
     if (result.errno !== 0) throw new Error(result.stderr || '读取日志失败');
     return { ok: true, content: result.stdout || result.stderr || '' };
   });
-  register('policySet', ['autostart', 'tethering', 'tethering_interfaces', 'bypass_packages', 'wifi_mode', 'wifi_ssids'], validPolicy, (payload) => shJson(SH + 'policy.sh set ' + [
-    payload.autostart ? '1' : '0', payload.tethering ? '1' : '0', shq(b64encode(payload.tethering_interfaces)),
-    shq(b64encode(payload.bypass_packages)), shq(payload.wifi_mode), shq(b64encode(payload.wifi_ssids)),
-  ].join(' '), 120000));
+  register('policySet', ['autostart', 'tethering', 'tethering_interfaces', 'bypass_packages', 'wifi_mode', 'wifi_ssids'], validPolicy, (payload) => shJson('policy.sh', ['set',
+    payload.autostart ? '1' : '0', payload.tethering ? '1' : '0', b64encode(payload.tethering_interfaces),
+    b64encode(payload.bypass_packages), payload.wifi_mode, b64encode(payload.wifi_ssids),
+  ], 120000));
   register('controller', ['path', 'method', 'body'], validController, controller);
   register('apps', ['refresh'], (payload) => boolean(payload.refresh, 'refresh', true), (payload) => getInstalledApps(payload.refresh));
   register('appIcon', ['packageName'], (payload) => validPackage(payload.packageName), (payload) => appIcon(payload.packageName));
+  register('proxyIcon', ['url'], (payload) => {
+    text(payload.url, 'url');
+    if (payload.url.length > 2048 || !/^(https?:\/\/[^\s]+|data:image\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]+)$/i.test(payload.url)) throw new Error('图标地址无效');
+  }, (payload) => proxyIcon(payload.url));
   register('template', ['subscriptions', 'secret', 'uiUrl', 'rulesUrl'], validTemplate, async (payload) => ({
     ok: true, content: renderTemplate(await fetchResource('template.yaml', (response) => response.text()), payload),
   }));
@@ -625,16 +810,14 @@
     if (!root.mihomoConfig) throw new Error('配置引擎未加载，请重新安装完整模块');
     return root.mihomoConfig;
   };
-  register('hostProbe', [], noValidation, () => shJson(SH + 'host.sh probe', 20000));
+  register('hostProbe', [], noValidation, () => shJson('host.sh', ['probe'], 20000));
   register('importUrl', ['url', 'ua'], (payload) => {
     httpUrl(payload.url, '链接');
     payload.ua = text(payload.ua, 'UA', true);
     if (/[\r\n]/.test(payload.ua) || payload.ua.length > 256) throw new Error('UA 无效');
   }, async (payload) => {
-    await shJson(SH + 'host.sh fetch ' + shq(payload.url) + ' ' + shq(payload.ua || 'clash.meta'), 90000);
-    const file = shq(DATA + '/run/import.yaml');
-    // KernelSU 用 libsu 的持久 shell 执行命令，顶层 exit 会被当成失败；整条命令放进子 shell。
-    const result = await exec('( (base64 -w 0 ' + file + ' 2>/dev/null || base64 ' + file + ' | tr -d "\\n"); status=$?; rm -f ' + file + '; exit $status )', 30000);
+    await shJson('host.sh', ['fetch', payload.url, payload.ua || 'clash.meta'], 90000);
+    const result = await run('host.sh', ['import-read'], 30000);
     if (result.errno !== 0 || !result.stdout.trim()) throw new Error(result.stderr || '读取下载内容失败');
     return { ok: true, content: b64decode(result.stdout.trim()) };
   });
@@ -705,7 +888,7 @@
     const list = [];
     for (const entry of await tailscaleEntries()) {
       const dir = tailscaleDir(entry.stateDir);
-      const state = dir ? await shJson(SH + 'tailscale.sh state ' + shq(dir)) : null;
+      const state = dir ? await shJson('tailscale.sh', ['state', dir]) : null;
       list.push({ name: entry.name, stateDir: dir, authKey: entry.used, ...tailscaleProfile(state) });
     }
     return { ok: true, list };
@@ -718,14 +901,21 @@
     const detected = await detectController();
     const wait = payload.wait || 20;
     const path = encodeURIComponent(payload.name).replace(/[!'()*]/g, (character) => '%' + character.charCodeAt(0).toString(16).toUpperCase());
-    return shJson('MIHOMO_SECRET=' + shq(detected.secret) + ' ' + SH + 'tailscale.sh login ' +
-      [detected.address, path, JSON.stringify(payload.name).slice(1, -1), String(wait)].map(shq).join(' '), (wait + 20) * 1000);
+    return shJson('tailscale.sh', ['login', detected.address, path, JSON.stringify(payload.name).slice(1, -1), String(wait)],
+      (wait + 20) * 1000, { MIHOMO_SECRET: detected.secret });
   });
   register('tailscaleLogout', ['name'], tailscaleName, async (payload) => {
     const { dir } = await tailscaleEntry(payload.name);
-    return shJson(SH + 'tailscale.sh logout ' + shq(dir), 120000);
+    return shJson('tailscale.sh', ['logout', dir], 120000);
   });
-  register('openUrl', ['url'], (payload) => httpUrl(payload.url, 'url'), (payload) => shJson(SH + 'tailscale.sh open ' + shq(payload.url)));
+  register('openUrl', ['url'], (payload) => httpUrl(payload.url, 'url'), (payload) => {
+    // 网页管理时在当前浏览器打开；在管理器里用系统浏览器打开
+    if (remoteMode()) {
+      root.open(payload.url, '_blank', 'noopener');
+      return { ok: true };
+    }
+    return shJson('tailscale.sh', ['open', payload.url]);
+  });
   register('qrCode', ['text'], (payload) => {
     text(payload.text, 'text');
     if (!payload.text || payload.text.length > 1024) throw new Error('二维码内容须为 1–1024 个字符');
@@ -742,6 +932,64 @@
       rows.push(line);
     }
     return { ok: true, size, rows };
+  });
+
+  // ---------- 网页管理 ----------
+  const WEBUI_KEYS = ['enabled', 'port', 'lan', 'allow_cidrs', 'require_password', 'tailscale', 'tailscale_no_password', 'tailscale_users', 'session_hours'];
+
+  register('webuiStatus', [], noValidation, () => shJson('webui.sh', ['status'], 20000));
+  register('webuiSet', ['settings'], (payload) => {
+    assertObject(payload.settings);
+    for (const [key, value] of Object.entries(payload.settings)) {
+      if (!WEBUI_KEYS.includes(key)) throw new Error('不支持的设置：' + key);
+      if (['enabled', 'lan', 'require_password', 'tailscale', 'tailscale_no_password'].includes(key)) boolean(value, key);
+      else if (key === 'port' || key === 'session_hours') {
+        if (!Number.isInteger(value)) throw new Error(key + ' 必须为整数');
+      } else if (!Array.isArray(value) || value.some((item) => typeof item !== 'string' || /[\s,]/.test(item) || item.length > 254)) {
+        throw new Error(key + ' 必须为不含空白的字符串列表');
+      }
+    }
+  }, (payload) => shJson('webui.sh', ['set', b64encode(JSON.stringify(payload.settings))], 30000));
+  register('webuiPasswd', ['password'], (payload) => {
+    text(payload.password, 'password');
+    if (payload.password && (payload.password.length < 6 || payload.password.length > 256)) throw new Error('密码须为 6–256 个字符');
+  }, (payload) => shJson('webui.sh', ['passwd', b64encode(payload.password)], 30000));
+  // 当前页面是否经网页管理打开，以及来源（lan / tailscale / local）
+  register('webuiSession', [], noValidation, async () => {
+    if (!remoteMode()) return { ok: true, remote: false };
+    const response = await root.fetch('api/session', { credentials: 'same-origin', headers: { 'X-Mihomo-Request': '1' } });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || ('网页服务 HTTP ' + response.status));
+    return { ok: true, remote: true, via: String(body.via || ''), login: String(body.login || ''), passwordless: body.passwordless === true };
+  });
+  register('webuiLogout', [], noValidation, async () => {
+    if (!remoteMode()) return { ok: true };
+    await root.fetch('api/logout', { method: 'POST', credentials: 'same-origin', headers: { 'X-Mihomo-Request': '1' } });
+    root.location.href = 'login';
+    return { ok: true };
+  });
+
+  // zashboard：内核在 /ui/ 提供面板；setup 参数让面板自动添加并连接本机控制器
+  register('dashboard', [], noValidation, async () => {
+    const detected = await detectController();
+    if (!detected.ui) return { ok: true, available: false, reason: '配置里没有 external-ui，面板未启用' };
+    const params = new URLSearchParams({ disableUpgradeCore: '1' });
+    if (detected.secret) params.set('secret', detected.secret);
+    if (remoteMode()) {
+      // 经网页管理的 /clash/ 反向代理访问控制器
+      const location = root.location;
+      const https = location.protocol === 'https:';
+      params.set('hostname', location.hostname);
+      params.set('port', location.port || (https ? '443' : '80'));
+      params.set('secondaryPath', '/clash');
+      params.set(https ? 'https' : 'http', '1');
+      return { ok: true, available: true, url: location.origin + '/clash/ui/#/setup?' + params.toString() };
+    }
+    const port = detected.address.slice(detected.address.lastIndexOf(':') + 1);
+    const host = detected.address.slice('http://'.length, detected.address.lastIndexOf(':')).replace(/^\[|\]$/g, '');
+    params.set('hostname', host);
+    params.set('port', port);
+    return { ok: true, available: true, url: detected.address + '/ui/#/setup?' + params.toString() };
   });
 
   root.mihomoBridge = Object.freeze({

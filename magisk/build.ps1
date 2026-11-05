@@ -94,6 +94,25 @@ if ($wasmFiles.Count -eq 0 -or (@($wasmFiles | Where-Object { $_.Length -eq 0 })
     throw 'WebUI 产物缺少非空 wasm；拒绝打包旧 webroot'
 }
 
+# 网页管理服务：静态链接的 Linux 程序，Android 上可直接运行；customize.sh 按 ARCH 保留其一
+$webdRoot = Join-Path $moduleRoot 'webd'
+$webdOut = Join-Path $webdRoot 'out'
+$webdFiles = @()
+foreach ($target in @(@{ Arch = 'arm64'; GoArch = 'arm64' }, @{ Arch = 'x64'; GoArch = 'amd64' })) {
+    $binary = Join-Path $webdOut "$($target.Arch)/mihomo-webd"
+    Push-Location -LiteralPath $webdRoot
+    $saved = @{ GOOS = $env:GOOS; GOARCH = $env:GOARCH; CGO_ENABLED = $env:CGO_ENABLED }
+    try {
+        $env:GOOS = 'linux'; $env:GOARCH = $target.GoArch; $env:CGO_ENABLED = '0'
+        & go build -trimpath -ldflags '-s -w' -o $binary .
+        if ($LASTEXITCODE -ne 0) { throw "mihomo-webd 构建失败（$($target.Arch)），退出码：$LASTEXITCODE" }
+    } finally {
+        foreach ($name in $saved.Keys) { Set-Item -Path "env:$name" -Value $saved[$name] }
+        Pop-Location
+    }
+    $webdFiles += @{ File = (Get-Item -LiteralPath $binary); Entry = "bin/$($target.Arch)/mihomo-webd" }
+}
+
 $moduleFiles = @('module.prop', 'customize.sh', 'service.sh', 'post-fs-data.sh') |
     ForEach-Object { Get-Item -LiteralPath (Join-Path $moduleRoot $_) -Force }
 $moduleFiles += @(Get-PackageFiles (Join-Path $moduleRoot 'scripts'))
@@ -120,6 +139,7 @@ try {
             $relative = [System.IO.Path]::GetRelativePath($webDist, $file.FullName).Replace('\', '/')
             Add-PackageFile $archive $file "webroot/$relative" $false
         }
+        foreach ($item in $webdFiles) { Add-PackageFile $archive $item.File $item.Entry $false }
     } finally { $archive.Dispose() }
     Assert-DistFile $temporaryOutput
     Assert-DistFile $output

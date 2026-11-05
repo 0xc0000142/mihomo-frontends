@@ -76,6 +76,7 @@ internal data class TailscaleEntry(
     val tailnet: String,
     val magicDns: String,
     val fields: List<ConfigField>,
+    val webui: Boolean = false,
 )
 
 internal object TailscaleState {
@@ -112,7 +113,8 @@ internal object TailscaleState {
             val name = item.string("name")
             val state = status[name] ?: JsonObject(emptyMap())
             TailscaleEntry(name, state.string("stateDir"), state.boolean("authKey"), state.boolean("loggedIn"),
-                state.string("login"), state.string("tailnet"), state.string("magicDns"), item.objects("fields").map { it.field() })
+                state.string("login"), state.string("tailnet"), state.string("magicDns"), item.objects("fields").map { it.field() },
+                item.boolean("webui"))
         }
         loaded = true
     }
@@ -171,6 +173,12 @@ internal object TailscaleState {
     fun delete(name: String) {
         notice = ""
         run("删除 $name…") { apply(listOf(op("tailscale.delete", name))); notice = "已删除 $name；登录状态仍保留在数据目录，重新添加时会继续使用" }
+    }
+
+    /** 网页管理：把 tailscale serve 挂到这个出站（其它出站上的会被撤掉），然后重启服务。 */
+    suspend fun setWebui(name: String, enable: Boolean) {
+        if (!loaded) refresh()
+        apply(listOf(JsonObject(mapOf("op" to JsonPrimitive("tailscale.webui"), "name" to JsonPrimitive(name), "enable" to JsonPrimitive(enable)))))
     }
 
     fun logout(name: String) {
@@ -419,10 +427,22 @@ private fun EditSheet(entry: TailscaleEntry?, onDismiss: () -> Unit) {
     }
     EditDialog(show = editing != null, title = editing?.label.orEmpty(),
         initial = editing?.let { field -> if (field.type == "secret") "" else fieldText(values[field.id] ?: field.value) }.orEmpty(),
-        summary = editing?.let { field -> if (field.type == "secret") "留空表示删除" else field.summary.ifEmpty { null } },
+        summary = editing?.let { field -> when (field.type) {
+            "secret" -> "留空表示删除"
+            "list" -> "一行一个，例如 192.168.1.0/24；留空表示删除"
+            else -> field.summary.ifEmpty { null }
+        } },
+        multiline = editing?.type == "list",
         onDismiss = { editing = null }) { text ->
         val field = editing ?: return@EditDialog null
         val trimmed = text.trim()
+        if (field.type == "list") {
+            val list = trimmed.split('\n', ',').map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+            list.firstOrNull { !it.matches(Regex("^[0-9A-Fa-f:.]+/[0-9]{1,3}$")) }?.let { return@EditDialog "网段格式无效：$it" }
+            values = values + (field.id to (if (list.isEmpty()) JsonNull else JsonArray(list.map { JsonPrimitive(it) })))
+            editing = null
+            return@EditDialog null
+        }
         if (field.id == "hostname" && !trimmed.matches(Regex("^[A-Za-z0-9-]{1,63}$"))) return@EditDialog "设备名只能包含字母、数字与 -"
         if (trimmed.contains(' ')) return@EditDialog "不能含空格"
         values = values + (field.id to (if (trimmed.isEmpty()) JsonNull else JsonPrimitive(trimmed)))

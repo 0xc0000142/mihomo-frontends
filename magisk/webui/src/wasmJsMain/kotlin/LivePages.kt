@@ -1,6 +1,15 @@
 package mihomo
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Image
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.toComposeImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import top.yukonga.miuix.kmp.icon.extended.Timer
+import kotlin.io.encoding.Base64
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -107,6 +116,10 @@ fun HomePage(onNavigate: (String) -> Unit) {
         group("快捷入口") {
             ArrowRow("代理", "切换节点与测速", startIcon = MiuixIcons.Regular.Tune) { onNavigate("proxies") }
             ArrowRow("连接", "查看与断开连接", startIcon = MiuixIcons.Regular.Link) { onNavigate("connections") }
+            ArrowRow("zashboard 面板", if (Dashboard.opening) "正在打开…" else "在浏览器里打开内核自带的面板", startIcon = MiuixIcons.Regular.Info) {
+                state.feedback.clear()
+                Dashboard.open { message -> state.feedback.error = message }
+            }
             ArrowRow("内核配置", "DNS、eBPF、订阅与规则集", startIcon = MiuixIcons.Regular.Settings) { onNavigate("profile") }
             ArrowRow("日志", startIcon = MiuixIcons.Regular.Notes) { onNavigate("logs") }
         }
@@ -203,26 +216,37 @@ private fun HomeStat(label: String, value: String, modifier: Modifier = Modifier
     }
 }
 
-/** 代理：每个策略组一行，点开底部弹窗选择节点，可测速。 */
+/**
+ * 代理：参照 zashboard——每个策略组一张卡片（图标、类型、当前节点、延迟），
+ * 点按展开为节点网格，点节点切换，点延迟单独测速；配置里 hidden: true 的组不显示。
+ */
 @Composable
 fun ProxiesPage(onBack: (() -> Unit)?) {
     val state = LiveProxies
-    var opened by remember { mutableStateOf<String?>(null) }
+    var expanded by remember { mutableStateOf<Set<String>>(emptySet()) }
     LaunchedEffect(Unit) { if (state.stale) liveRead("读取代理组中…") { state.load() } }
     Page(title = "代理", navigationIcon = { if (onBack != null) BackIcon(onBack) }, actions = {
         BarAction(MiuixIcons.Regular.Refresh, "刷新", enabled = liveIdle) { state.refresh() }
     }) {
         banner(if (!liveIdle) liveActivity else "", BannerKind.Progress, "activity")
         banner(state.error.ifEmpty { state.feedback.error }, BannerKind.Error, "error")
-        val groups = state.groups
+        val groups = state.groups?.filter { !it.hidden }
         if (groups != null && groups.isEmpty()) item(key = "empty") { EmptyState(MiuixIcons.Regular.Tune, "没有策略组，请先启动服务") }
-        if (!groups.isNullOrEmpty()) group(null, "groups") {
-            for (group in groups) ProxyGroupRow(group) { opened = group.key }
+        for (group in groups.orEmpty()) {
+            val open = group.key in expanded
+            item(key = "group:${group.key}") {
+                ProxyGroupCard(group, open) { expanded = if (open) expanded - group.key else expanded + group.key }
+            }
+            if (open) {
+                if (!group.selectable) item(key = "auto:${group.key}") {
+                    Text("该组由内核自动选择，不能手动切换", fontSize = 12.sp, color = Tone.muted,
+                        modifier = Modifier.padding(horizontal = 24.dp).padding(bottom = 8.dp))
+                }
+                val rows = group.options.chunked(2)
+                items(rows.size, key = { "nodes:${group.key}:$it" }) { index -> ProxyNodeRow(group, rows[index]) }
+                item(key = "gap:${group.key}") { Spacer(Modifier.height(12.dp)) }
+            }
         }
-    }
-    val group = state.groups?.firstOrNull { it.key == opened }
-    Sheet(show = group != null, title = group?.name ?: "", onDismissRequest = { opened = null }) {
-        if (group != null) ProxyNodes(group) { opened = null }
     }
 }
 
@@ -236,9 +260,9 @@ private fun delayColor(delay: Int?): Color = when {
 }
 
 private fun delayText(delay: Int?): String = when {
-    delay == null -> ""
+    delay == null -> "测速"
     delay <= 0 -> "超时"
-    else -> "$delay ms"
+    else -> "$delay"
 }
 
 private fun groupLabel(type: String): String = when (type) {
@@ -251,48 +275,131 @@ private fun groupLabel(type: String): String = when (type) {
 }
 
 @Composable
-private fun ProxyGroupRow(group: LiveProxyGroup, onOpen: () -> Unit) {
-    val delay = LiveProxies.delays[group.selected]
-    BasicComponent(
-        title = group.name,
-        summary = "${groupLabel(group.type)} · ${group.selected.ifEmpty { "未选择" }}",
-        onClick = onOpen,
-        endActions = {
-            if (delay != null) Text(delayText(delay), fontSize = 13.sp, color = delayColor(delay))
-        },
-    )
+private fun DelayChip(name: String, modifier: Modifier = Modifier) {
+    val state = LiveProxies
+    val delay = state.delays[name]
+    val testing = name in state.testing
+    Box(modifier.clip(RoundedCornerShape(8.dp)).clickable(enabled = !testing) { state.testNode(name) }
+        .padding(horizontal = 6.dp, vertical = 2.dp), contentAlignment = Alignment.Center) {
+        if (testing) CircularProgressIndicator(size = 12.dp, strokeWidth = 1.5.dp)
+        else Text(delayText(delay), fontSize = 12.sp, fontWeight = FontWeight.Medium, color = delayColor(delay), maxLines = 1)
+    }
 }
 
 @Composable
-private fun ProxyNodes(group: LiveProxyGroup, onPicked: () -> Unit) {
+private fun ProxyGroupCard(group: LiveProxyGroup, open: Boolean, onToggle: () -> Unit) {
     val state = LiveProxies
     val testing = group.key in state.testing
-    Column(Modifier.fillMaxWidth().padding(bottom = 16.dp)) {
-        TextButton(if (testing) "测速中…" else "测试延迟", onClick = { state.test(group) }, enabled = !testing,
-            modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp))
-        if (!group.selectable) {
-            Text("该组由内核自动选择，不能手动切换", fontSize = 13.sp, color = Tone.muted, modifier = Modifier.padding(bottom = 8.dp))
-        }
-        LazyColumn(Modifier.fillMaxWidth().heightIn(max = 480.dp)) {
-            items(group.options, key = { it }) { name ->
-                val selected = name == group.selected
-                val delay = state.delays[name]
-                Row(
-                    Modifier.fillMaxWidth().padding(vertical = 2.dp).clip(RoundedCornerShape(14.dp))
-                        .background(if (selected) MiuixTheme.colorScheme.primary.copy(alpha = 0.12f) else Color.Transparent)
-                        .clickable(enabled = group.selectable && state.writable && !selected) {
-                            state.select(group, name)
-                            onPicked()
-                        }
-                        .padding(horizontal = 16.dp, vertical = 14.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(name, modifier = Modifier.weight(1f), fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        color = if (selected) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.onSurface,
-                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
-                    if (delay != null) Text(delayText(delay), fontSize = 13.sp, color = delayColor(delay))
+    Card(Modifier.padding(horizontal = 12.dp).padding(bottom = if (open) 8.dp else 12.dp).fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth().clickable(onClick = onToggle).padding(start = 16.dp, end = 8.dp, top = 14.dp, bottom = 14.dp),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            GroupIcon(group.icon, group.name)
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(group.name, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        color = MiuixTheme.colorScheme.onSurface, modifier = Modifier.weight(1f, fill = false))
+                    Tag(groupLabel(group.type), Tone.muted)
+                    Text("${group.options.size}", fontSize = 12.sp, color = Tone.muted)
                 }
+                Text(group.selected.ifEmpty { "未选择" }, fontSize = 13.sp, color = Tone.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
+            if (group.selected.isNotEmpty()) DelayChip(group.selected)
+            Box(Modifier.size(36.dp).clip(CircleShape).clickable(enabled = !testing) { state.test(group) }, contentAlignment = Alignment.Center) {
+                if (testing) CircularProgressIndicator(size = 18.dp, strokeWidth = 2.dp)
+                else Icon(MiuixIcons.Regular.Timer, "测试 ${group.name} 的延迟", tint = MiuixTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProxyNodeRow(group: LiveProxyGroup, names: List<String>) {
+    Row(Modifier.padding(horizontal = 12.dp).padding(bottom = 8.dp).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        for (name in names) ProxyNodeChip(group, name, Modifier.weight(1f))
+        if (names.size == 1) Spacer(Modifier.weight(1f))
+    }
+}
+
+@Composable
+private fun ProxyNodeChip(group: LiveProxyGroup, name: String, modifier: Modifier) {
+    val state = LiveProxies
+    val selected = name == group.selected
+    val node = state.nodes[name]
+    val primary = MiuixTheme.colorScheme.primary
+    Column(
+        modifier.clip(RoundedCornerShape(14.dp))
+            .background(if (selected) primary.copy(alpha = 0.14f) else MiuixTheme.colorScheme.surfaceContainer)
+            .clickable(enabled = group.selectable && state.writable && !selected) { state.select(group, name) }
+            .padding(start = 12.dp, end = 6.dp, top = 10.dp, bottom = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Text(name, fontSize = 13.sp, lineHeight = 17.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(end = 6.dp),
+            color = if (selected) primary else MiuixTheme.colorScheme.onSurface,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            val subtitle = when {
+                node == null -> ""
+                node.type in setOf("Selector", "URLTest", "Fallback", "Smart", "LoadBalance") -> "策略组"
+                else -> node.type + if (node.udp) " · UDP" else ""
+            }
+            Text(subtitle, fontSize = 11.sp, color = Tone.muted, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            DelayChip(name)
+        }
+    }
+}
+
+/** 策略组图标：配置里的 icon（http(s) 或 data: 链接），PNG/JPEG/WebP 由 Skia 解码，SVG 用 SVGDOM 栅格化。 */
+private class GroupIconState {
+    var bitmap by mutableStateOf<ImageBitmap?>(null)
+    var loaded = false
+}
+
+private val groupIcons = mutableMapOf<String, GroupIconState>()
+private val groupIconLoads = Semaphore(3)
+
+private fun decodeIcon(uri: String): ImageBitmap? {
+    if (!uri.startsWith("data:image/") || !uri.contains(";base64,")) return null
+    val bytes = Base64.decode(uri.substringAfter(";base64,"))
+    if (uri.startsWith("data:image/svg")) {
+        val dom = org.jetbrains.skia.svg.SVGDOM(org.jetbrains.skia.Data.makeFromBytes(bytes))
+        val size = 96
+        dom.setContainerSize(size.toFloat(), size.toFloat())
+        val surface = org.jetbrains.skia.Surface.makeRasterN32Premul(size, size)
+        dom.render(surface.canvas)
+        return surface.makeImageSnapshot().toComposeImageBitmap()
+    }
+    return org.jetbrains.skia.Image.makeFromEncoded(bytes).toComposeImageBitmap()
+}
+
+@Composable
+private fun GroupIcon(url: String, name: String) {
+    val modifier = Modifier.size(36.dp).clip(RoundedCornerShape(10.dp))
+    if (url.isEmpty()) {
+        Box(modifier.background(MiuixTheme.colorScheme.secondaryContainer), contentAlignment = Alignment.Center) {
+            Text(name.take(1).ifEmpty { "?" }, color = MiuixTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+        }
+        return
+    }
+    val state = remember(url) { groupIcons.getOrPut(url) { GroupIconState() } }
+    LaunchedEffect(url) {
+        if (state.loaded) return@LaunchedEffect
+        groupIconLoads.withPermit {
+            if (state.loaded) return@withPermit
+            try {
+                state.bitmap = decodeIcon(request("proxyIcon", json("url" to url)).string("icon"))
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+            }
+            state.loaded = true
+        }
+    }
+    val bitmap = state.bitmap
+    if (bitmap != null) {
+        Image(bitmap, name, modifier, contentScale = ContentScale.Fit)
+    } else {
+        Box(modifier.background(MiuixTheme.colorScheme.secondaryContainer), contentAlignment = Alignment.Center) {
+            Text(name.take(1).ifEmpty { "?" }, color = MiuixTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
         }
     }
 }

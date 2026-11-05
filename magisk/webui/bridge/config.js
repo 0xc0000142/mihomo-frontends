@@ -158,17 +158,17 @@
     {
       id: 'basic', title: '基础', summary: '端口、运行模式与日志',
       fields: [
-        { path: ['mode'], label: '运行模式', type: 'enum', options: [['rule', '规则'], ['global', '全局'], ['direct', '直连']], def: 'rule' },
+        { path: ['mode'], label: '运行模式', summary: '规则：按规则分流；全局：全部走 GLOBAL 组选中的节点；直连：全部不走代理', type: 'enum', options: [['rule', '规则'], ['global', '全局'], ['direct', '直连']], def: 'rule' },
         { path: ['mixed-port'], label: '混合端口', summary: 'HTTP/SOCKS5 入站，0 为关闭', type: 'int', min: 0, max: 65535 },
         { path: ['allow-lan'], label: '允许局域网连接', summary: '公共 Wi-Fi 下建议关闭', type: 'bool', def: false },
-        { path: ['bind-address'], label: '监听地址', type: 'text', placeholder: '*' },
-        { path: ['ipv6'], label: 'IPv6', type: 'bool', def: true },
-        { path: ['log-level'], label: '日志级别', type: 'enum', options: [['silent', '静默'], ['error', '错误'], ['warning', '警告'], ['info', '信息'], ['debug', '调试']], def: 'info' },
+        { path: ['bind-address'], label: '监听地址', summary: '允许局域网连接时监听的地址，* 为全部网卡', type: 'text', placeholder: '*' },
+        { path: ['ipv6'], label: 'IPv6', summary: '关闭后内核不处理 IPv6 连接与解析', type: 'bool', def: true },
+        { path: ['log-level'], label: '日志级别', summary: '调试会产生大量日志并更耗电，排查问题时再打开', type: 'enum', options: [['silent', '静默'], ['error', '错误'], ['warning', '警告'], ['info', '信息'], ['debug', '调试']], def: 'info' },
         { path: ['find-process-mode'], label: '查找进程', summary: '按应用分流时需要；off 更省电', type: 'enum', options: [['always', '总是'], ['strict', '按需'], ['off', '关闭']], def: 'strict' },
         { path: ['tcp-concurrent'], label: 'TCP 并发', summary: '同时连接解析出的多个 IP，取最快', type: 'bool', def: false },
         { path: ['unified-delay'], label: '统一延迟', summary: '测速时扣除握手耗时', type: 'bool', def: false },
-        { path: ['sniffer', 'enable'], label: '域名嗅探', type: 'bool', def: false },
-        { path: ['profile', 'store-selected'], label: '记住手动选择的节点', type: 'bool', def: false },
+        { path: ['sniffer', 'enable'], label: '域名嗅探', summary: '从 TLS/HTTP 握手里读出域名，让按 IP 进来的连接也能按域名规则分流', type: 'bool', def: false },
+        { path: ['profile', 'store-selected'], label: '记住手动选择的节点', summary: '重启后恢复上次在代理页手动选择的节点', type: 'bool', def: false },
         { path: ['geodata-loader'], label: 'GEO 加载方式', summary: '低内存设备建议省内存', type: 'enum', options: [['standard', '标准'], ['memconservative', '省内存']], def: 'standard' },
       ],
     },
@@ -176,51 +176,51 @@
       id: 'controller', title: '控制器与面板', summary: 'RESTful API 与网页面板',
       fields: [
         { path: ['external-controller'], label: '控制器地址', summary: '仅本机使用时保持 127.0.0.1', type: 'listen', required: true },
-        { path: ['secret'], label: '控制器密钥', type: 'secret' },
-        { path: ['external-ui'], label: '面板目录', type: 'text', placeholder: './dashboard' },
-        { path: ['external-ui-url'], label: '面板下载地址', type: 'url' },
-        { path: ['geox-url', 'geoip'], label: 'GeoIP 下载地址', type: 'url' },
-        { path: ['geox-url', 'geosite'], label: 'GeoSite 下载地址', type: 'url' },
-        { path: ['geox-url', 'mmdb'], label: 'MMDB 下载地址', type: 'url' },
-        { path: ['geo-auto-update'], label: '自动更新 GEO 数据', type: 'bool', def: false },
+        { path: ['secret'], label: '控制器密钥', summary: '控制器与面板的访问密码；网页管理与 zashboard 都会用到', type: 'secret' },
+        { path: ['external-ui'], label: '面板目录', summary: '面板文件存放目录，内核在 http://控制器地址/ui/ 提供面板', type: 'text', placeholder: './dashboard' },
+        { path: ['external-ui-url'], label: '面板下载地址', summary: '面板目录为空时内核从这里下载面板压缩包（例如 zashboard）', type: 'url' },
+        { path: ['geox-url', 'geoip'], label: 'GeoIP 下载地址', summary: 'GEOIP 规则使用的数据文件', type: 'url' },
+        { path: ['geox-url', 'geosite'], label: 'GeoSite 下载地址', summary: 'GEOSITE 规则使用的数据文件', type: 'url' },
+        { path: ['geox-url', 'mmdb'], label: 'MMDB 下载地址', summary: 'GeoIP 的 MaxMind 格式数据', type: 'url' },
+        { path: ['geo-auto-update'], label: '自动更新 GEO 数据', summary: '按周期重新下载上面三个数据文件', type: 'bool', def: false },
       ],
     },
     {
       id: 'dns', title: 'DNS', summary: '解析模式与上游服务器',
       fields: [
-        { path: ['dns', 'enable'], label: '启用 DNS', type: 'bool', def: false },
-        { path: ['dns', 'listen'], label: '监听地址', type: 'listen', placeholder: '127.0.0.1:1053' },
-        { path: ['dns', 'enhanced-mode'], label: '模式', type: 'enum', options: [['redir-host', 'redir-host'], ['fake-ip', 'fake-ip'], ['normal', 'normal']], def: 'redir-host' },
-        { path: ['dns', 'ipv6'], label: '返回 IPv6 地址（AAAA）', type: 'bool', def: false },
-        { path: ['dns', 'fake-ip-range'], label: 'FakeIP 地址段（IPv4）', type: 'text', placeholder: '198.18.0.1/16' },
+        { path: ['dns', 'enable'], label: '启用 DNS', summary: '由内核接管 DNS 解析；透明代理与 FakeIP 都依赖它', type: 'bool', def: false },
+        { path: ['dns', 'listen'], label: '监听地址', summary: '内核 DNS 服务监听地址，eBPF 劫持的 DNS 会转到这里', type: 'listen', placeholder: '127.0.0.1:1053' },
+        { path: ['dns', 'enhanced-mode'], label: '模式', summary: 'fake-ip：返回假地址，连接时才按域名分流，速度快；redir-host：返回真实地址，兼容性好', type: 'enum', options: [['redir-host', 'redir-host'], ['fake-ip', 'fake-ip'], ['normal', 'normal']], def: 'redir-host' },
+        { path: ['dns', 'ipv6'], label: '返回 IPv6 地址（AAAA）', summary: '关闭后对 AAAA 查询返回空，避免没有 IPv6 出口时连接变慢', type: 'bool', def: false },
+        { path: ['dns', 'fake-ip-range'], label: 'FakeIP 地址段（IPv4）', summary: 'fake-ip 模式分配假地址用的网段，不要和局域网冲突', type: 'text', placeholder: '198.18.0.1/16' },
         { path: ['dns', 'default-nameserver'], label: '引导服务器', summary: '用于解析其它 DNS 服务器的域名', type: 'list', limit: 32 },
-        { path: ['dns', 'nameserver'], label: '默认服务器', type: 'list', limit: 32 },
-        { path: ['dns', 'proxy-server-nameserver'], label: '代理节点域名的服务器', type: 'list', limit: 32 },
-        { path: ['dns', 'direct-nameserver'], label: '直连域名的服务器', type: 'list', limit: 32 },
-        { path: ['dns', 'fake-ip-filter'], label: '不使用 FakeIP 的域名', type: 'list', limit: 1024 },
+        { path: ['dns', 'nameserver'], label: '默认服务器', summary: '未被下面两项覆盖的域名用这里的服务器解析', type: 'list', limit: 32 },
+        { path: ['dns', 'proxy-server-nameserver'], label: '代理节点域名的服务器', summary: '只用于解析代理节点自身的域名，避免依赖代理才能解析', type: 'list', limit: 32 },
+        { path: ['dns', 'direct-nameserver'], label: '直连域名的服务器', summary: '命中直连规则的域名用这里的服务器解析，通常填国内 DNS', type: 'list', limit: 32 },
+        { path: ['dns', 'fake-ip-filter'], label: '不使用 FakeIP 的域名', summary: '这些域名始终返回真实地址（如局域网、NTP、游戏联机）', type: 'list', limit: 1024 },
       ],
     },
     {
       id: 'ebpf', title: 'eBPF 透明代理', summary: '协议、内核直连与数据面',
       fields: [
-        { path: [L, 'network'], label: '协议', type: 'enum', options: [['tcp,udp', 'TCP + UDP'], ['tcp', '仅 TCP'], ['udp', '仅 UDP']], def: 'tcp,udp', joined: true },
-        { path: [L, 'udp-timeout'], label: 'UDP 会话超时（秒）', type: 'int', min: 5, max: 86400, placeholder: '300' },
+        { path: [L, 'network'], label: '协议', summary: '透明代理接管的协议；只代理 TCP 时 UDP 直接走系统网络', type: 'enum', options: [['tcp,udp', 'TCP + UDP'], ['tcp', '仅 TCP'], ['udp', '仅 UDP']], def: 'tcp,udp', joined: true },
+        { path: [L, 'udp-timeout'], label: 'UDP 会话超时（秒）', summary: 'UDP 会话空闲多久后释放', type: 'int', min: 5, max: 86400, placeholder: '300' },
         { path: [L, 'bypass-rule-set'], label: '内核直连的规则集', summary: '命中的目标不进入 mihomo，省电', type: 'list', ruleSets: 'ipcidr', limit: 32 },
-        { path: [L, 'fakeip-icmp'], label: 'FakeIP 的 ICMP', type: 'enum', options: [['off', '关闭'], ['reply', '本地应答']], def: 'off' },
+        { path: [L, 'fakeip-icmp'], label: 'FakeIP 的 ICMP', summary: '本地应答：ping FakeIP 地址时由内核直接回复，避免被误判断网；需要本机数据面为 tc 或开启共享', type: 'enum', options: [['off', '关闭'], ['reply', '本地应答']], def: 'off' },
         { path: [L, 'bypass-tun-direct'], label: 'TUN 共存直连', summary: '与其它 VPN 应用共存', type: 'bool', def: true },
-        { path: [L, 'local', 'data-plane'], label: '本机数据面', type: 'enum', options: [['cgroup', 'cgroup'], ['tc', 'tc']], def: 'cgroup' },
-        { path: [L, 'local', 'ipv6'], label: '本机处理 IPv6', type: 'bool', def: true },
-        { path: [L, 'local', 'bypass-private-address'], label: '本机私网地址直连', type: 'bool', def: true },
-        { path: [L, 'local', 'bypass-exclude'], label: '本机强制进入 mihomo 的地址段', type: 'list', item: 'cidr', limit: 256 },
-        { path: [L, 'local', 'bypass-port'], label: '本机直连的目标端口', type: 'list', item: 'port', limit: 256 },
-        { path: [L, 'shared', 'data-plane'], label: '共享数据面', type: 'enum', options: [['packet_rewrite', 'packet_rewrite'], ['socket_assign', 'socket_assign']], def: 'packet_rewrite' },
-        { path: [L, 'shared', 'dns-mode'], label: '共享设备 DNS', type: 'enum', options: [['hijack', '劫持'], ['respect_policy', '按规则'], ['off', '关闭']], def: 'hijack' },
-        { path: [L, 'shared', 'ipv6'], label: '共享处理 IPv6', type: 'bool', def: true },
-        { path: [L, 'shared', 'bypass-private-address'], label: '共享私网地址直连', type: 'bool', def: true },
-        { path: [L, 'shared', 'include-mac-address'], label: '只代理这些设备（MAC）', type: 'list', item: 'mac', limit: 256 },
-        { path: [L, 'shared', 'exclude-mac-address'], label: '不代理这些设备（MAC）', type: 'list', item: 'mac', limit: 256 },
-        { path: [L, 'shared', 'include-source-cidr'], label: '只代理这些来源地址', type: 'list', item: 'cidr', limit: 256 },
-        { path: [L, 'shared', 'exclude-source-cidr'], label: '不代理这些来源地址', type: 'list', item: 'cidr', limit: 256 },
+        { path: [L, 'local', 'data-plane'], label: '本机数据面', summary: 'cgroup（默认）：在应用发起连接时改写目标地址，兼容性最好；tc：在默认网卡出口选包经 veth 交给 mihomo，需要内核 5.7+，可配合 FakeIP 的 ICMP 应答', type: 'enum', options: [['cgroup', 'cgroup'], ['tc', 'tc']], def: 'cgroup' },
+        { path: [L, 'local', 'ipv6'], label: '本机处理 IPv6', summary: '本机的 IPv6 连接也进入透明代理', type: 'bool', def: true },
+        { path: [L, 'local', 'bypass-private-address'], label: '本机私网地址直连', summary: '私网地址（含 Tailnet 的 100.64.0.0/10）不经过 mihomo；网关需要看到局域网连接时关闭', type: 'bool', def: true },
+        { path: [L, 'local', 'bypass-exclude'], label: '本机强制进入 mihomo 的地址段', summary: '即使命中私网直连，这些网段仍交给 mihomo（如 Tailnet 100.64.0.0/10）', type: 'list', item: 'cidr', limit: 256 },
+        { path: [L, 'local', 'bypass-port'], label: '本机直连的目标端口', summary: '访问这些目标端口时不经过 mihomo', type: 'list', item: 'port', limit: 256 },
+        { path: [L, 'shared', 'data-plane'], label: '共享数据面', summary: 'packet_rewrite（默认）：在共享网卡入口改写目标地址、出口还原，需要以太网帧（热点、USB 共享）；socket_assign：保留原始地址直接交给 mihomo，需要内核 5.7+，无以太网头的链路也能用', type: 'enum', options: [['packet_rewrite', 'packet_rewrite'], ['socket_assign', 'socket_assign']], def: 'packet_rewrite' },
+        { path: [L, 'shared', 'dns-mode'], label: '共享设备 DNS', summary: '劫持：共享设备的 DNS 全部交给内核；按规则：按分流规则决定；关闭：不处理', type: 'enum', options: [['hijack', '劫持'], ['respect_policy', '按规则'], ['off', '关闭']], def: 'hijack' },
+        { path: [L, 'shared', 'ipv6'], label: '共享处理 IPv6', summary: '共享设备的 IPv6 连接也进入透明代理', type: 'bool', def: true },
+        { path: [L, 'shared', 'bypass-private-address'], label: '共享私网地址直连', summary: '共享设备访问私网地址时不经过 mihomo', type: 'bool', def: true },
+        { path: [L, 'shared', 'include-mac-address'], label: '只代理这些设备（MAC）', summary: '填了以后只有这些设备走代理', type: 'list', item: 'mac', limit: 256 },
+        { path: [L, 'shared', 'exclude-mac-address'], label: '不代理这些设备（MAC）', summary: '这些设备的流量不走代理', type: 'list', item: 'mac', limit: 256 },
+        { path: [L, 'shared', 'include-source-cidr'], label: '只代理这些来源地址', summary: '填了以后只有这些来源地址走代理', type: 'list', item: 'cidr', limit: 256 },
+        { path: [L, 'shared', 'exclude-source-cidr'], label: '不代理这些来源地址', summary: '来自这些地址的流量不走代理', type: 'list', item: 'cidr', limit: 256 },
       ],
     },
   ];
@@ -244,14 +244,22 @@
     { key: ['proxy'], label: '下载经由', type: 'policy', def: 'DIRECT' },
   ];
 
-  // Tailscale 出站（与 LuCI TS_FIELDS 对齐；不提供 advertise-routes：通告路由会让 mihomo -t 真的启动 tsnet）。
+  // Tailscale 出站（与 LuCI TS_FIELDS 对齐）。advertise-routes 需要内核在 -t 校验时跳过 tsnet 启动（liuran001/mihomo 935b0887 起）。
   const TAILSCALE_FIELDS = [
     { key: ['hostname'], label: '设备名', summary: '在 Tailnet 中显示的名称', type: 'text', required: true, pattern: /^[A-Za-z0-9-]{1,63}$/, hint: '只能包含字母、数字与 -' },
     { key: ['auth-key'], label: 'Auth key', summary: '留空时用网页登录', type: 'secret' },
     { key: ['udp'], label: '转发 UDP', type: 'bool', def: false },
     { key: ['accept-routes'], label: '接受子网路由', type: 'bool', def: false },
     { key: ['exit-node'], label: '出口节点', summary: '节点名或 IP，留空不使用', type: 'text' },
+    { key: ['advertise-routes'], label: '通告子网路由', summary: '让 Tailnet 里的设备经本机访问这些网段（如家里的局域网）；需在 Tailscale 后台批准', type: 'list', item: 'cidr', limit: 64 },
   ];
+  // 网页管理经内核 tailscale serve 发布到本机 Tailnet 地址（unix socket 只有 root 能连接，身份头可信）
+  const WEBUI_SERVE_TARGET = 'unix:run/webui.sock';
+  const WEBUI_SERVE_PORT = 80;
+
+  function webuiServe(item) {
+    return Array.isArray(item.serve) && item.serve.some((entry) => isObject(entry) && entry.target === WEBUI_SERVE_TARGET);
+  }
   const TAILSCALE_NAME = /^[A-Za-z0-9_.-]{1,64}$/;
 
   function tailscaleList(data) {
@@ -321,7 +329,7 @@
     }));
     const tailscale = tailscaleList(data).map((item) => ({
       name: String(item.name || ''), type: 'tailscale', editable: true, stateDir: typeof item['state-dir'] === 'string' ? item['state-dir'] : '',
-      used: !!item['auth-key'],
+      used: !!item['auth-key'], webui: webuiServe(item),
       fields: TAILSCALE_FIELDS.map((field) => ({ ...fieldState(field, item, null, extra), id: field.key.join('.'), path: field.key })),
     }));
     return { ok: true, sections, providers, ruleProviders, tailscale, providerFields: PROVIDER_FIELDS.map((field) => fieldState(field, {}, null, extra)),
@@ -388,7 +396,7 @@
       const data = plain(doc);
       if (op.op === 'set') applySet(doc, data, op);
       else if (/^(provider|ruleProvider)\.(set|add|delete)$/.test(op.op)) applyCollection(doc, data, op);
-      else if (/^tailscale\.(set|add|delete)$/.test(op.op)) applyTailscale(doc, data, op);
+      else if (/^tailscale\.(set|add|delete|webui)$/.test(op.op)) applyTailscale(doc, data, op);
       else throw new Error('不支持的修改：' + op.op);
     }
     const output = dump(doc);
@@ -589,6 +597,28 @@
       return;
     }
     const index = plain(doc).proxies.findIndex((item) => isObject(item) && item.type === 'tailscale' && item.name === name);
+    if (action === 'webui') {
+      // 只有一个出站发布网页管理：开启时先从其它出站上撤掉
+      if (typeof op.enable !== 'boolean') throw new Error('enable 必须为布尔值');
+      plain(doc).proxies.forEach((item, position) => {
+        if (!isObject(item) || item.type !== 'tailscale' || !Array.isArray(item.serve)) return;
+        if (position === index && op.enable) return;
+        const rest = item.serve.filter((entry) => !(isObject(entry) && entry.target === WEBUI_SERVE_TARGET));
+        if (rest.length === item.serve.length) return;
+        if (rest.length) setIn(doc, ['proxies', position, 'serve'], rest); else deleteIn(doc, ['proxies', position, 'serve']);
+      });
+      if (op.enable) {
+        const current = plain(doc).proxies[index];
+        const serve = Array.isArray(current.serve) ? current.serve : [];
+        if (serve.some((entry) => isObject(entry) && Number(entry.port) === WEBUI_SERVE_PORT && entry.target !== WEBUI_SERVE_TARGET)) {
+          throw new Error(name + ' 的 serve 已占用 80 端口，请在配置原文中调整');
+        }
+        if (!serve.some((entry) => isObject(entry) && entry.target === WEBUI_SERVE_TARGET)) {
+          setIn(doc, ['proxies', index, 'serve'], serve.concat([{ port: WEBUI_SERVE_PORT, target: WEBUI_SERVE_TARGET }]));
+        }
+      }
+      return;
+    }
     for (const field of TAILSCALE_FIELDS) {
       const id = field.key.join('.');
       if (!(id in values)) continue;

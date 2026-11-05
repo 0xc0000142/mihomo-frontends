@@ -1,0 +1,212 @@
+// mihomo-webd：模块网页的局域网 / Tailscale 管理服务。
+//
+//	mihomo-webd serve  -c CONF -root WEBROOT -scripts DIR -data DIR [-socket PATH]
+//	mihomo-webd get    -c CONF            输出设置（不含密码）与本机地址
+//	mihomo-webd set    -c CONF B64JSON    更新设置（只接受已知字段，不改密码）
+//	mihomo-webd passwd -c CONF B64        设置密码；空串清除密码
+//	mihomo-webd addrs                     输出本机可用于访问的地址
+//
+// 子命令的输出都是一行 JSON：{"ok":true,...} 或 {"ok":false,"error":"..."}。
+package main
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"log"
+	"net"
+	"net/netip"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"unicode/utf8"
+)
+
+func main() {
+	if len(os.Args) < 2 {
+		fail(errors.New("用法: mihomo-webd serve|get|set|passwd|addrs"))
+	}
+	flags := flag.NewFlagSet(os.Args[1], flag.ContinueOnError)
+	configPath := flags.String("c", "/data/adb/mihomo/webui.json", "设置文件")
+	webroot := flags.String("root", "/data/adb/modules/mihomo-ebpf/webroot", "网页目录")
+	scriptDir := flags.String("scripts", "/data/adb/modules/mihomo-ebpf/scripts", "脚本目录")
+	dataDir := flags.String("data", "/data/adb/mihomo", "数据目录")
+	socket := flags.String("socket", "/data/adb/mihomo/run/webui.sock", "Tailscale serve 使用的 unix socket（空则不监听）")
+	if err := flags.Parse(os.Args[2:]); err != nil {
+		fail(err)
+	}
+	args := flags.Args()
+	switch os.Args[1] {
+	case "serve":
+		serve(*configPath, *webroot, *scriptDir, *dataDir, *socket)
+	case "get":
+		config, err := loadConfig(*configPath)
+		if err != nil {
+			fail(err)
+		}
+		out := publicConfig(config)
+		out["ok"] = true
+		out["addrs"] = localAddrs()
+		emit(out)
+	case "set":
+		if len(args) != 1 {
+			fail(errors.New("缺少设置"))
+		}
+		fail(setConfig(*configPath, args[0]))
+	case "passwd":
+		if len(args) != 1 {
+			fail(errors.New("缺少密码"))
+		}
+		fail(setPassword(*configPath, args[0]))
+	case "addrs":
+		emit(map[string]any{"ok": true, "addrs": localAddrs()})
+	default:
+		fail(fmt.Errorf("未知子命令 %s", os.Args[1]))
+	}
+}
+
+func emit(value any) {
+	data, _ := json.Marshal(value)
+	fmt.Println(string(data))
+}
+
+// fail 输出错误 JSON 并退出；err 为 nil 时输出 {"ok":true}。
+func fail(err error) {
+	if err == nil {
+		emit(map[string]any{"ok": true})
+		os.Exit(0)
+	}
+	emit(map[string]any{"ok": false, "error": err.Error()})
+	os.Exit(1)
+}
+
+func decodeArg(value string) ([]byte, error) {
+	data, err := base64.StdEncoding.DecodeString(value)
+	if err != nil {
+		return nil, errors.New("参数不是 base64")
+	}
+	return data, nil
+}
+
+func setConfig(path, encoded string) error {
+	data, err := decodeArg(encoded)
+	if err != nil {
+		return err
+	}
+	config, err := loadConfig(path)
+	if err != nil {
+		return err
+	}
+	var patch struct {
+		Enabled             *bool     `json:"enabled"`
+		Port                *int      `json:"port"`
+		LAN                 *bool     `json:"lan"`
+		AllowCIDRs          *[]string `json:"allow_cidrs"`
+		RequirePassword     *bool     `json:"require_password"`
+		Tailscale           *bool     `json:"tailscale"`
+		TailscaleNoPassword *bool     `json:"tailscale_no_password"`
+		TailscaleUsers      *[]string `json:"tailscale_users"`
+		SessionHours        *int      `json:"session_hours"`
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&patch); err != nil {
+		return fmt.Errorf("设置无效：%w", err)
+	}
+	assign := func(target *bool, value *bool) {
+		if value != nil {
+			*target = *value
+		}
+	}
+	assign(&config.Enabled, patch.Enabled)
+	assign(&config.LAN, patch.LAN)
+	assign(&config.RequirePassword, patch.RequirePassword)
+	assign(&config.Tailscale, patch.Tailscale)
+	assign(&config.TailscaleNoPassword, patch.TailscaleNoPassword)
+	if patch.Port != nil {
+		config.Port = *patch.Port
+	}
+	if patch.SessionHours != nil {
+		config.SessionHours = *patch.SessionHours
+	}
+	if patch.AllowCIDRs != nil {
+		config.AllowCIDRs = *patch.AllowCIDRs
+	}
+	if patch.TailscaleUsers != nil {
+		config.TailscaleUsers = *patch.TailscaleUsers
+	}
+	return saveConfig(path, config)
+}
+
+func setPassword(path, encoded string) error {
+	data, err := decodeArg(encoded)
+	if err != nil {
+		return err
+	}
+	config, err := loadConfig(path)
+	if err != nil {
+		return err
+	}
+	password := string(data)
+	if password == "" {
+		config.Password = nil
+		return saveConfig(path, config)
+	}
+	if !utf8.ValidString(password) || utf8.RuneCountInString(password) < 6 || len(password) > 256 {
+		return errors.New("密码须为 6–256 个字符")
+	}
+	hash, err := hashPassword(password)
+	if err != nil {
+		return err
+	}
+	config.Password = hash
+	return saveConfig(path, config)
+}
+
+// localAddrs 列出非回环的 IPv4 与全局 IPv6 地址，供设置页显示访问链接。
+func localAddrs() []map[string]string {
+	list := []map[string]string{}
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return list
+	}
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			prefix, err := netip.ParsePrefix(addr.String())
+			if err != nil {
+				continue
+			}
+			ip := prefix.Addr().Unmap()
+			if ip.IsLinkLocalUnicast() || ip.IsLoopback() || (ip.Is6() && !ip.IsGlobalUnicast()) {
+				continue
+			}
+			list = append(list, map[string]string{"iface": iface.Name, "addr": ip.String()})
+		}
+	}
+	return list
+}
+
+func serve(configPath, webroot, scriptDir, dataDir, socket string) {
+	log.SetFlags(log.LstdFlags)
+	log.SetPrefix("[webd] ")
+	server, err := newServer(configPath, webroot, scriptDir, dataDir)
+	if err != nil {
+		log.Fatal(err)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := server.listen(ctx, socket); err != nil {
+		log.Fatal(err)
+	}
+}

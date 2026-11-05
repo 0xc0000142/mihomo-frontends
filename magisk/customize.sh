@@ -11,6 +11,13 @@ case "$ARCH" in
 esac
 
 set_perm_recursive "$MODPATH/scripts" 0 0 0755 0755
+
+# 网页管理服务：只保留当前架构的程序
+if [ -f "$MODPATH/bin/$ARCH/mihomo-webd" ]; then
+  mv -f "$MODPATH/bin/$ARCH/mihomo-webd" "$MODPATH/bin/mihomo-webd"
+  set_perm "$MODPATH/bin/mihomo-webd" 0 0 0755
+fi
+rm -rf "$MODPATH/bin/arm64" "$MODPATH/bin/x64"
 set_perm "$MODPATH/service.sh" 0 0 0755
 set_perm "$MODPATH/post-fs-data.sh" 0 0 0755
 

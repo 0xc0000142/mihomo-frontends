@@ -30,11 +30,18 @@ function mockBackend() {
   const host = { ok: true, abi: 'aarch64', kernel: '6.1.75-android14-11', sdk: 35, android: '15', model: 'Xiaomi 15', cpus: 8,
     mem_mb: 11742, btf: true, cgroup2: true, bpffs: true, kernel_ok: true, ipv6: false, upstream: 'wlan0', ssid: '家庭 Wi-Fi',
     core: !fresh, root: 'kernelsu', mirror: 'https://ghfast.top/', has_config: !fresh };
+  const svgIcon = 'data:image/svg+xml;base64,' + btoa('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48"><circle cx="24" cy="24" r="22" fill="#3482ff"/><path d="M14 25l7 7 13-15" stroke="#fff" stroke-width="5" fill="none" stroke-linecap="round"/></svg>');
+  const many = Array.from({ length: 120 }, (_, i) => '节点 ' + String(i + 1).padStart(3, '0'));
   const groups = [
-    { name: '节点选择', type: 'Selector', now: '香港 01', all: ['自动选择', '香港 01', '香港 02', '日本 01', '美国 01', 'DIRECT'] },
-    { name: '自动选择', type: 'URLTest', now: '香港 02', all: ['香港 01', '香港 02', '日本 01', '美国 01'] },
+    { name: '节点选择', type: 'Selector', now: '香港 01', icon: svgIcon, all: ['自动选择', '香港 01', '香港 02', '日本 01', '美国 01', 'DIRECT'] },
+    { name: '自动选择', type: 'URLTest', now: '香港 02', icon: 'https://example.invalid/auto.png', all: ['香港 01', '香港 02', '日本 01', '美国 01'] },
+    { name: '全部节点', type: 'Selector', now: many[3], all: many },
+    { name: '隐藏组', type: 'Selector', now: 'DIRECT', hidden: true, all: ['DIRECT'] },
   ];
   const delays = { '香港 01': 82, '香港 02': 64, '日本 01': 121, '美国 01': 233, DIRECT: 6 };
+  many.forEach((name, i) => { delays[name] = i % 9 === 0 ? 0 : 60 + (i * 37) % 900; });
+  const webui = { enabled: false, port: 9099, lan: false, allow_cidrs: [], require_password: true, tailscale: false,
+    tailscale_no_password: false, tailscale_users: [], session_hours: 168, has_password: false };
   const tsLogged = {};
   window.mihomoBridge = { request: async (operation, raw = '{}') => {
     const payload = JSON.parse(raw);
@@ -77,7 +84,15 @@ function mockBackend() {
       case 'tailscaleLogin': await sleep(1500); setTimeout(() => { tsLogged[payload.name] = true; }, 8000);
         result = { ok: true, url: 'https://login.tailscale.com/a/1a2b3c4d5e6f70' }; break;
       case 'tailscaleLogout': delete tsLogged[payload.name]; break;
-      case 'openUrl': break;
+      case 'openUrl': window.__opened = payload.url; break;
+      case 'proxyIcon': if (!payload.url.startsWith('data:')) throw new Error('预览无法下载图标'); result = { ok: true, icon: payload.url }; break;
+      case 'webuiStatus': result = { ok: true, installed: true, running: webui.enabled, settings: { ok: true, ...webui,
+        addrs: [{ iface: 'wlan0', addr: '192.168.1.23' }, { iface: 'tailscale0', addr: '100.64.0.2' }] } }; break;
+      case 'webuiSet': Object.assign(webui, payload.settings); result = { ok: true, installed: true, running: webui.enabled, settings: { ok: true, ...webui,
+        addrs: [{ iface: 'wlan0', addr: '192.168.1.23' }] } }; break;
+      case 'webuiPasswd': webui.has_password = !!payload.password; break;
+      case 'webuiSession': result = { ok: true, remote: false }; break;
+      case 'dashboard': result = { ok: true, available: true, url: 'http://127.0.0.1:9090/ui/#/setup?hostname=127.0.0.1&port=9090' }; break;
       case 'qrCode': {
         const code = window.qrcode(0, 'M');
         code.addData(payload.text, 'Byte');
@@ -91,15 +106,25 @@ function mockBackend() {
       case 'backupRead': result = { ok: true, content: config }; break;
       case 'coreRollback': case 'backupRestore': case 'backupDel': break;
       case 'backups': result = { ok: true, backups: [{ name: 'config-20261104-2210.yaml', size: 13312, time: 1730729400 }] }; break;
-      case 'logs': result = { ok: true, content: 'time="2026-11-05T10:00:00" level=info msg="Start initial configuration in progress"\n' +
-        'time="2026-11-05T10:00:01" level=info msg="Mixed(http+socks) proxy listening at: 127.0.0.1:7890"\n' }; break;
+      case 'logs': {
+        const lines = ['[2026-11-05 09:59:58] mihomo.sh: 启动服务',
+          'time="2026-11-05T10:00:00.1+08:00" level=info msg="Start initial configuration in progress"',
+          'time="2026-11-05T10:00:01.2+08:00" level=info msg="Mixed(http+socks) proxy listening at: 127.0.0.1:7890"',
+          'time="2026-11-05T10:00:02.3+08:00" level=warning msg="geoip.dat not found, downloading"',
+          'time="2026-11-05T10:00:03.4+08:00" level=error msg="dial tcp 1.2.3.4:443: i/o timeout"',
+          'time="2026-11-05T10:00:04.5+08:00" level=debug msg="[DNS] resolve www.google.com from udp://223.5.5.5:53"'];
+        for (let i = 0; i < 280; i++) lines.push('time="2026-11-05T10:01:' + String(i % 60).padStart(2, '0') + '.0+08:00" level=info msg="[TCP] 192.168.43.' + (i % 250) + ':' + (40000 + i) + ' --> www.example' + i + '.com:443 match DomainSuffix(example' + i + '.com) using 节点选择[香港 01]"');
+        result = { ok: true, content: lines.join('\n') + '\n' };
+        break;
+      }
       case 'controller': {
         const p = payload.path || '';
         if (p.startsWith('/proxies') && p.includes('/delay')) result = { ok: true, data: { delay: 70 + Math.round(Math.random() * 90) } };
         else if (p === '/proxies') {
           const proxies = {};
-          for (const g of groups) proxies[g.name] = { name: g.name, type: g.type, now: g.now, all: g.all, history: [] };
-          for (const [name, delay] of Object.entries(delays)) proxies[name] = { name, type: name === 'DIRECT' ? 'Direct' : 'Vless', history: [{ delay }] };
+          for (const g of groups) proxies[g.name] = { name: g.name, type: g.type, now: g.now, all: g.all, icon: g.icon || '', hidden: !!g.hidden, history: [] };
+          proxies.GLOBAL = { name: 'GLOBAL', type: 'Selector', now: 'DIRECT', all: groups.map((g) => g.name).concat(['DIRECT']), history: [] };
+          for (const [name, delay] of Object.entries(delays)) proxies[name] = { name, type: name === 'DIRECT' ? 'Direct' : 'Vless', udp: name !== 'DIRECT', history: [{ delay }] };
           result = { ok: true, data: { proxies } };
         } else if (p === '/connections') result = { ok: true, data: { downloadTotal: 734003200, uploadTotal: 41943040, connections: [
           { id: '1', chains: ['香港 02', '自动选择'], rule: 'RuleSet', rulePayload: 'google', upload: 2048, download: 90112,

@@ -22,6 +22,13 @@ jobs:
           java-version: '17'
       - name: 配置 Gradle 缓存与 Wrapper 校验
         uses: gradle/actions/setup-gradle@v6
+      - name: 安装 Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: magisk/webd/go.mod
+      - name: 网页管理服务测试
+        working-directory: magisk/webd
+        run: go vet ./... && go test ./...
       - name: Magisk 回归测试
         run: |
           node --test magisk/tests/frontend.test.js magisk/tests/bridge.test.js magisk/tests/onboarding.test.js magisk/tests/config.test.js
@@ -30,6 +37,7 @@ jobs:
           sh magisk/tests/backend-process.sh
           sh magisk/tests/backend-readiness.sh
           sh magisk/tests/tailscale.sh
+          sh magisk/tests/host-webui.sh
       - name: 构建 Compose Miuix Wasm WebUI
         working-directory: magisk/webui
         run: sh ./gradlew --no-daemon wasmJsBrowserDistribution

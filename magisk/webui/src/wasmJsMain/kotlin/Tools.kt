@@ -3,6 +3,7 @@ package mihomo
 // 工具页：配置原文、备份、内核、日志。状态对象保留原有的串行执行与确认语义，界面改为 Miuix 设置页样式。
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -459,21 +460,36 @@ fun CorePage(onBack: () -> Unit) {
 @Composable
 fun LogsPage(onBack: () -> Unit) {
     val state = ToolsLogs
+    var level by remember { mutableStateOf<LogLevel?>(null) }
+    var query by remember { mutableStateOf("") }
     LaunchedEffect(Unit) { if (!state.attempted) state.refresh() }
-    Page(title = "日志", subtitle = "最近 300 行", navigationIcon = { BackIcon(onBack) }, actions = {
+    val entries = remember(state.content) {
+        state.content.orEmpty().trimEnd().lines().filter { it.isNotBlank() }.asReversed().map { parseLog(it) }
+    }
+    val counts = remember(entries) { entries.groupingBy { if (it.level == LogLevel.OTHER) LogLevel.INFO else it.level }.eachCount() }
+    val shown = remember(entries, level, query) {
+        entries.filter { entry ->
+            (level == null || entry.level == level || (level == LogLevel.INFO && entry.level == LogLevel.OTHER)) &&
+                (query.isBlank() || entry.message.contains(query.trim(), ignoreCase = true))
+        }
+    }
+    Page(title = "日志", subtitle = "最近 300 行，最新的在上", navigationIcon = { BackIcon(onBack) }, actions = {
         BarAction(MiuixIcons.Regular.Refresh, "刷新", enabled = toolsIdle) { state.refresh() }
     }) {
         if (toolsActiveWork === state.work) banner(state.work.status, BannerKind.Progress, "work")
         banner(state.work.error, BannerKind.Error, "error")
         val content = state.content
-        if (content != null && content.isBlank()) item(key = "empty") { EmptyState(MiuixIcons.Regular.Notes, "暂无日志") }
-        if (!content.isNullOrBlank()) {
-            val lines = content.trimEnd().lines().asReversed()
-            item(key = "logs") {
-                Card(Modifier.padding(horizontal = 12.dp).padding(bottom = 12.dp).fillMaxWidth()) {
-                    CodeBlock(lines.joinToString("\n") { line -> line.replace(Regex("^time=\"[^\"]*T([0-9:]{8})[^\"]*\"\\s*"), "$1 ") })
+        if (content != null && entries.isEmpty()) item(key = "empty") { EmptyState(MiuixIcons.Regular.Notes, "暂无日志") }
+        if (entries.isNotEmpty()) {
+            item(key = "filter") {
+                Column {
+                    LogLevelChips(level, counts) { level = it }
+                    TextField(value = query, onValueChange = { query = it }, label = "搜索日志", singleLine = true,
+                        modifier = Modifier.padding(horizontal = 12.dp).padding(bottom = 8.dp).fillMaxWidth())
                 }
             }
+            if (shown.isEmpty()) item(key = "none") { EmptyState(MiuixIcons.Regular.Notes, "没有匹配的日志") }
+            items(shown.size) { index -> LogLine(shown[index]) }
         }
     }
 }

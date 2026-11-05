@@ -92,9 +92,17 @@ done
 cp -R -- "$module_root/scripts" "$stage/scripts"
 mkdir -- "$stage/webroot"
 cp -R -- "$web_dist/." "$stage/webroot/"
+# 网页管理服务：静态链接的 Linux 程序，customize.sh 按 ARCH 保留其一
+command -v go >/dev/null 2>&1 || fail '缺少 go，无法构建 mihomo-webd'
+for target in arm64:arm64 x64:amd64; do
+  (
+    cd -- "$module_root/webd"
+    GOOS=linux GOARCH=${target#*:} CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o "$stage/bin/${target%%:*}/mihomo-webd" .
+  )
+done
 (
   cd -- "$stage"
-  ZIPOPT='' zip -q -r -X "$stage/module.zip" module.prop customize.sh service.sh post-fs-data.sh scripts webroot
+  ZIPOPT='' zip -q -r -X "$stage/module.zip" module.prop customize.sh service.sh post-fs-data.sh scripts webroot bin
 )
 [ ! -L "$dist" ] || fail "dist 不能是符号链接：$dist"
 if [ -e "$out" ] || [ -L "$out" ]; then

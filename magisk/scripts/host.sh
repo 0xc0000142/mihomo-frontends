@@ -3,12 +3,22 @@
 #   host.sh probe          输出 JSON：架构、SDK、内存、eBPF/BTF、IPv6、上游/共享网卡
 #   host.sh fetch URL UA   下载远程配置到 run/import.yaml，输出 {"ok":true,"size":N}
 #   host.sh stage N B64    把第 N 段 base64 追加到暂存文件（N=0 时清空），供大配置分段写入
+#   host.sh read-config    输出 config.yaml 的 base64（单行）
+#   host.sh import-read    输出 fetch 下载内容的 base64 并删除下载文件
+#   host.sh validate SRC   用内核 -t 校验配置；SRC 为 base64 或 --staged（暂存文件，用后删除）
+#   host.sh logs N         输出最近 N 行内核日志与 logcat 中的 mihomo 日志
+#   host.sh controller     输出配置中的 external-controller、secret、external-ui 行（原样）
+#   host.sh api METHOD URL [BODY]
+#                          请求本机控制器，密钥由环境变量 MIHOMO_SECRET 传入；输出响应体与 __MIHOMO_HTTP__:状态码
+# 网页管理（mihomo-webd）只能调用这些脚本子命令，不能执行任意 shell。
 . "${0%/*}/common.sh"
 . "$SCRIPTS/policy-lib.sh"
 
 STAGE=$RUN_DIR/stage.b64
 IMPORT=$RUN_DIR/import.yaml
 MAX_IMPORT=4194304
+NL='
+'
 
 fail() { json_error "$1"; exit 1; }
 
@@ -119,9 +129,97 @@ stage() {
   printf '{"ok":true,"size":%s}\n' "$size"
 }
 
+b64_file() {
+  base64 -w 0 "$1" 2>/dev/null || base64 "$1" | tr -d '\n'
+}
+
+read_config() {
+  [ -s "$CONFIG" ] || { echo '配置文件不存在' >&2; exit 1; }
+  b64_file "$CONFIG"
+}
+
+import_read() {
+  [ -s "$IMPORT" ] || { echo '没有下载内容' >&2; exit 1; }
+  b64_file "$IMPORT"; status=$?
+  rm -f "$IMPORT"
+  exit $status
+}
+
+validate() {
+  [ -x "$BIN" ] || { echo '内核未安装' >&2; exit 1; }
+  ensure_dirs || exit 1
+  tmp=$(mktemp "$RUN_DIR/validate.XXXXXX") || exit 1
+  trap 'rm -f "$tmp"' EXIT
+  if [ "$1" = --staged ]; then
+    [ -s "$STAGE" ] || { echo '暂存文件丢失，请重试' >&2; exit 1; }
+    base64 -d <"$STAGE" >"$tmp"; status=$?
+    rm -f "$STAGE"
+  else
+    case "$1" in ''|*[!a-zA-Z0-9+/=]*) echo '配置不是 base64' >&2; exit 1 ;; esac
+    printf '%s' "$1" | base64 -d >"$tmp"; status=$?
+  fi
+  [ "$status" = 0 ] || { echo '配置 base64 解码失败' >&2; exit 1; }
+  "$BIN" -d "$DATA" -f "$tmp" -t
+}
+
+logs() {
+  case "$1" in ''|*[!0-9]*) fail '行数无效' ;; esac
+  [ "$1" -ge 1 ] && [ "$1" -le 10000 ] || fail '行数须为 1–10000'
+  tail -n "$1" "$LOG_FILE" 2>/dev/null
+  logcat -d -s 'mihomo:*' 2>/dev/null | tail -n 50
+  exit 0
+}
+
+# 策略组图标：浏览器因跨域读不到时由这里下载，输出单行 base64（最多 256 KB）
+icon() {
+  url=$1
+  case "$url" in http://*|https://*) ;; *) echo '只支持 http(s) 链接' >&2; exit 2 ;; esac
+  case "$url" in *"$NL"*|*"$(printf '\r')"*) echo '链接不能含换行' >&2; exit 2 ;; esac
+  [ "${#url}" -le 2048 ] || { echo '链接过长' >&2; exit 2; }
+  command -v curl >/dev/null 2>&1 || { echo '缺少 curl' >&2; exit 127; }
+  ensure_dirs || exit 1
+  tmp=$(mktemp "$RUN_DIR/icon.XXXXXX") || exit 1
+  trap 'rm -f "$tmp"' EXIT
+  curl -fsSL --disable --globoff -m 10 --max-filesize 262144 -o "$tmp" -- "$url" || exit 1
+  [ -s "$tmp" ] || { echo '图标为空' >&2; exit 1; }
+  b64_file "$tmp"
+}
+
+controller_lines() {
+  grep -E '^(external-controller|secret|external-ui):' "$CONFIG" 2>/dev/null
+}
+
+api() {
+  method=$1 url=$2
+  case "$method" in GET|PUT|POST|PATCH|DELETE) ;; *) echo '请求方法无效' >&2; exit 2 ;; esac
+  case "$url" in http://127.0.0.1:[0-9]*|http://localhost:[0-9]*|'http://[::1]:'[0-9]*) ;; *) echo '控制器地址必须是本机' >&2; exit 2 ;; esac
+  case "$url" in *"$NL"*|*"$(printf '\r')"*) echo '地址不能含换行' >&2; exit 2 ;; esac
+  if [ -x /system/bin/curl ]; then curl_bin=/system/bin/curl; else curl_bin=$(command -v curl 2>/dev/null); fi
+  if [ -z "$curl_bin" ] || [ ! -x "$curl_bin" ]; then
+    echo '未找到可执行的 curl：/system/bin/curl 不可用，PATH 中也未找到；请安装 curl 模块' >&2
+    exit 127
+  fi
+  if [ "$#" -ge 3 ]; then
+    body=$3
+    set -- --header 'Content-Type: application/json' --data-binary "$body"
+  else
+    set --
+  fi
+  exec "$curl_bin" --disable --silent --show-error --globoff --noproxy '*' --connect-timeout 3 --max-time 8 \
+    --request "$method" --header "Authorization: Bearer ${MIHOMO_SECRET:-}" \
+    --write-out '\n__MIHOMO_HTTP__:%{http_code}' --url "$url" "$@"
+}
+
 case "${1:-}" in
+  read-config) read_config ;;
+  import-read) import_read ;;
+  validate) [ "$#" -eq 2 ] || fail '参数无效'; validate "$2" ;;
+  logs) logs "${2:-200}" ;;
+  controller) controller_lines ;;
+  icon) [ "$#" -eq 2 ] || { echo '参数无效' >&2; exit 2; }; icon "$2" ;;
+  api) [ "$#" -eq 3 ] || [ "$#" -eq 4 ] || { echo '参数无效' >&2; exit 2; }; shift; api "$@" ;;
   probe) probe ;;
   fetch) [ "$#" -ge 2 ] || fail '缺少链接'; fetch "$2" "${3:-}" ;;
   stage) [ "$#" -eq 3 ] || fail '参数无效'; stage "$2" "$3" ;;
-  *) fail '用法: host.sh probe|fetch|stage' ;;
+  *) fail '用法: host.sh probe|fetch|stage|read-config|import-read|validate|logs|controller|icon|api' ;;
 esac

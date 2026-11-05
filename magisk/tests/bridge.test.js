@@ -57,17 +57,29 @@ function shellWords(command) {
   return words;
 }
 
+// 控制器请求经 host.sh api METHOD URL [BODY]，密钥在 MIHOMO_SECRET 环境变量里
 function isCurl(command) {
-  return command.startsWith('(if [ -x /system/bin/curl ];');
+  return command.includes(scriptRoot + 'host.sh api ');
 }
 
+function isDetect(command) {
+  return command === scriptRoot + 'host.sh controller';
+}
+
+// 还原成等价的 curl 参数，便于按 --url / --header 取值
 function curlArguments(command) {
   assert.ok(isCurl(command));
-  const marker = '; "$curl_bin" ';
-  const offset = command.indexOf(marker);
-  assert.notEqual(offset, -1);
-  assert.ok(command.endsWith(')'));
-  return shellWords(command.slice(offset + marker.length, -1));
+  const words = shellWords(command);
+  assert.ok(words[0].startsWith('MIHOMO_SECRET='), 'secret travels in the environment');
+  const secret = words[0].slice('MIHOMO_SECRET='.length);
+  assert.equal(words[1], 'sh');
+  assert.equal(words[2], scriptRoot.slice(3) + 'host.sh');
+  assert.equal(words[3], 'api');
+  const [method, url, body] = words.slice(4);
+  assert.ok(words.length === 6 || words.length === 7);
+  return ['--request', method, '--header', 'Authorization: Bearer ' + secret]
+    .concat(body === undefined ? [] : ['--header', 'Content-Type: application/json', '--data-binary', body])
+    .concat(['--url', url]);
 }
 
 function makeBridge(options = {}) {
@@ -106,7 +118,7 @@ function makeBridge(options = {}) {
     },
   };
   const sandbox = {
-    TextEncoder, TextDecoder, Uint8Array, URL, AbortController, crypto: webcrypto,
+    TextEncoder, TextDecoder, Uint8Array, URL, URLSearchParams, AbortController, crypto: webcrypto,
     btoa: (value) => Buffer.from(value, 'latin1').toString('base64'),
     atob: (value) => Buffer.from(value, 'base64').toString('latin1'),
     setTimeout(callback, delay) {
@@ -135,7 +147,7 @@ function makeBridge(options = {}) {
         if (response === undefined) {
           if (command === scriptRoot + 'mihomo.sh status') response = jsonResult(bridge.status);
           else if (command === scriptRoot + 'core.sh info') response = jsonResult({ ok: true, installed: true, version: 'test', can_rollback: 'no' });
-          else if (command.startsWith('grep -E ')) response = result('external-controller: 127.0.0.1:9090\nsecret: "test-secret"');
+          else if (isDetect(command)) response = result('external-controller: 127.0.0.1:9090\nsecret: "test-secret"');
           else if (isCurl(command)) response = httpResult({ version: 'test' });
           else if (command === scriptRoot + 'discovery.sh apps') response = jsonResult({ ok: true, apps: [], source: 'package-manager' });
           else response = jsonResult({ ok: true });
@@ -146,7 +158,14 @@ function makeBridge(options = {}) {
     },
     ...options.globals,
   };
+  if (options.remote) {
+    // 网页管理：没有 ksu，页面来自 http(s)
+    delete sandbox.ksu;
+    sandbox.location = { protocol: 'http:', hostname: '192.168.1.5', port: '9099', origin: 'http://192.168.1.5:9099', pathname: '/', hash: '', href: 'http://192.168.1.5:9099/', ...options.remote };
+    sandbox.open = (...args) => bridge.opened.push(args);
+  }
   sandbox.window = sandbox;
+  bridge.opened = [];
   bridge.context = vm.createContext(sandbox);
   vm.runInContext(source, bridge.context, { filename: 'backend.js' });
   assert.equal('document' in bridge.context, false, 'the backend must load without a DOM');
@@ -367,12 +386,12 @@ test('validate and apply inline up to 120000 Base64 bytes and stage larger confi
       const stages = bridge.commands.filter((command) => command.startsWith(scriptRoot + 'host.sh stage '));
       assert.ok(stages.every((command, index) => bridge.commands[index] === command), 'stages run first');
       assert.equal(stages.length, 2);
-      assert.ok(stages[0].startsWith(scriptRoot + 'host.sh stage 0 '));
+      assert.ok(stages[0].startsWith(scriptRoot + "host.sh stage '0' "));
       const joined = stages.map((command) => command.split(' ').at(-1).slice(1, -1)).join('');
       assert.equal(joined, Buffer.from(larger).toString('base64'));
       const final = bridge.commands[stages.length];
-      if (operation === 'apply') assert.ok(final.startsWith(scriptRoot + 'apply.sh --staged'));
-      else assert.ok(final.includes('base64 -d < ') && final.includes('stage.b64'));
+      if (operation === 'apply') assert.ok(final.startsWith(scriptRoot + "apply.sh '--staged'"));
+      else assert.equal(final, scriptRoot + "host.sh validate '--staged'");
       assertClean(bridge);
     }
   }
@@ -381,7 +400,7 @@ test('validate and apply inline up to 120000 Base64 bytes and stage larger confi
 });
 
 test('stage failures abort before apply runs', async () => {
-  const bridge = makeBridge({ handler: (command) => command.includes('host.sh stage 1 ') ? result('{"ok":false,"error":"写入暂存文件失败"}', 1) : undefined });
+  const bridge = makeBridge({ handler: (command) => command.includes("host.sh stage '1' ") ? result('{"ok":false,"error":"写入暂存文件失败"}', 1) : undefined });
   const response = await bridge.request('apply', { content: 'a'.repeat(100000) });
   assertError(response, /暂存/);
   assert.ok(!bridge.commands.some((command) => command.includes('apply.sh')));
@@ -392,7 +411,7 @@ test('host probe, URL import and config engine operations are exposed with valid
   const bridge = makeBridge({ handler: (command) => {
     if (command === scriptRoot + 'host.sh probe') return jsonResult({ ok: true, ipv6: false, mem_mb: 4000 });
     if (command.startsWith(scriptRoot + 'host.sh fetch ')) return jsonResult({ ok: true, size: 12 });
-    if (command.startsWith('( (base64 -w 0 ')) return result(Buffer.from('mixed-port: 1\n').toString('base64'));
+    if (command === scriptRoot + 'host.sh import-read') return result(Buffer.from('mixed-port: 1\n').toString('base64'));
     return undefined;
   } });
   assert.equal((await bridge.request('hostProbe')).ipv6, false);
@@ -569,12 +588,10 @@ test('configRead and backupRead decode wrapped UTF-8 Base64 and reject bad outpu
 test('logs exposes a stable object with content, bounded line count and errors', async () => {
   const bridge = makeBridge({ handler: () => result('内核日志\nAndroid 日志\n') });
   assert.deepEqual(await bridge.request('logs'), { ok: true, content: '内核日志\nAndroid 日志\n' });
-  assert.ok(bridge.commands[0].startsWith('tail -n 200 '));
+  assert.equal(bridge.commands[0], scriptRoot + "host.sh logs '200'");
   for (const lines of [1, 300, 10000]) {
     assert.equal((await bridge.request('logs', { lines })).ok, true);
-    assert.ok(bridge.commands.at(-1).startsWith('tail -n ' + lines + ' '));
-    assert.ok(bridge.commands.at(-1).includes("'/data/adb/mihomo/run/mihomo.log'"));
-    assert.ok(bridge.commands.at(-1).includes('logcat -d -s mihomo:*'));
+    assert.equal(bridge.commands.at(-1), scriptRoot + "host.sh logs '" + lines + "'");
   }
   bridge.handler = () => result('');
   assert.deepEqual(await bridge.request('logs'), { ok: true, content: '' });
@@ -583,8 +600,7 @@ test('logs exposes a stable object with content, bounded line count and errors',
   assertClean(bridge);
 });
 
-test('controller probes source config on every request and parses quoted YAML scalars safely', async () => {
-  const bridge = makeBridge();
+test('controller parses quoted YAML scalars safely and falls back to curl when the page cannot reach it', async () => {
   for (const [config, address, secret] of [
     ['external-controller: 0.0.0.0:9090 # local\nsecret: "a b\\\"c" # comment', '127.0.0.1:9090', 'a b"c'],
     ["external-controller: '[::]:9091'\nsecret: 'it''s # exact'", '127.0.0.1:9091', "it's # exact"],
@@ -592,23 +608,74 @@ test('controller probes source config on every request and parses quoted YAML sc
     ['external-controller: :9093\nsecret: null', '127.0.0.1:9093', ''],
     ['external-controller: "*:9094"\nsecret: "new-secret"', '127.0.0.1:9094', 'new-secret'],
   ]) {
-    bridge.handler = (command) => command.startsWith('grep -E ') ? result(config) : undefined;
-    const before = bridge.commands.length;
+    const bridge = makeBridge({ handler: (command) => isDetect(command) ? result(config) : undefined });
     assert.deepEqual(await bridge.request('controller', { path: '/version' }), { ok: true, data: { version: 'test' } });
-    assert.equal(bridge.commands.length, before + 2);
-    const detection = bridge.commands[before];
-    assert.ok(detection.includes("'/data/adb/mihomo/config.yaml'"));
-    assert.ok(!detection.includes('/run/'));
+    assert.equal(bridge.commands.length, 2);
+    assert.equal(bridge.commands[0], scriptRoot + 'host.sh controller');
+    assert.equal(bridge.fetches.length, 1, 'direct attempt first');
+    assert.equal(bridge.fetches[0].url, 'http://' + address + '/version');
+    assert.equal(bridge.fetches[0].init.headers.Authorization, 'Bearer ' + secret);
     const args = curlArguments(bridge.commands.at(-1));
     assert.equal(args[args.indexOf('--url') + 1], 'http://' + address + '/version');
     assert.equal(args[args.indexOf('--header') + 1], 'Authorization: Bearer ' + secret);
     assertClean(bridge);
   }
-  assert.deepEqual(bridge.fetches, []);
+});
+
+test('controller talks to mihomo directly when possible and caches the detected address', async () => {
+  const bridge = makeBridge({
+    fetch: async (url, init) => ({ status: url.endsWith('/proxies/missing') ? 404 : 200, text: async () => (url.endsWith('/proxies/missing') ? 'not found' : JSON.stringify({ url, method: init.method, body: init.body || null })) }),
+  });
+  const first = await bridge.request('controller', { path: '/proxies/a', method: 'PUT', body: { name: 'b' } });
+  assert.deepEqual(first.data, { url: 'http://127.0.0.1:9090/proxies/a', method: 'PUT', body: '{"name":"b"}' });
+  assert.equal(bridge.fetches[0].init.headers.Authorization, 'Bearer test-secret');
+  assert.equal(bridge.fetches[0].init.headers['Content-Type'], 'application/json');
+  await bridge.request('controller', { path: '/version' });
+  assert.deepEqual(bridge.commands, [scriptRoot + 'host.sh controller'], 'no curl, and the address is detected once');
+  assertError(await bridge.request('controller', { path: '/proxies/missing' }), /HTTP 404/);
+  assert.equal(bridge.commands.filter(isCurl).length, 0, 'HTTP errors do not fall back to curl');
+  await bridge.request('apply', { content: 'port: 1\n', restart: false });
+  await bridge.request('controller', { path: '/version' });
+  assert.equal(bridge.commands.filter(isDetect).length, 2, 'saving the config re-detects the controller');
+});
+
+test('controller stops trying the direct path for a while once curl succeeds after it failed', async () => {
+  const bridge = makeBridge();
+  await bridge.request('controller', { path: '/version' });
+  await bridge.request('controller', { path: '/proxies' });
+  assert.equal(bridge.fetches.length, 1);
+  assert.equal(bridge.commands.filter(isCurl).length, 2);
+});
+
+test('remote mode reaches the controller through the same-origin /clash proxy', async () => {
+  const bridge = remoteBridge((body) => body.args[0] === 'controller' ? { errno: 0, stdout: 'external-controller: 127.0.0.1:9090\nsecret: "k"', stderr: '' } : undefined);
+  const original = bridge.context.fetch;
+  bridge.context.fetch = async (url, init) => url.startsWith('http://192.168.1.5:9099/clash/')
+    ? { status: 200, text: async () => JSON.stringify({ url, auth: init.headers.Authorization }) } : original(url, init);
+  const response = await bridge.request('controller', { path: '/version' });
+  assert.deepEqual(response.data, { url: 'http://192.168.1.5:9099/clash/version', auth: 'Bearer k' });
+  assert.equal(bridge.runs.filter((run) => run.body.args[0] === 'api').length, 0);
+});
+
+test('commands use ksu.spawn when the manager provides it so the page is not blocked', async () => {
+  const spawned = [];
+  const bridge = makeBridge({ ksu: { spawn(command, args, options, callbackName) {
+    spawned.push({ command, args, options });
+    const target = bridge.context[callbackName];
+    target.stdout.emit('data', '{"ok":true,');
+    target.stdout.emit('data', '"running":true}');
+    target.stderr.emit('data', 'warn');
+    target.emit('exit', 0);
+  } } });
+  const status = await bridge.request('status');
+  assert.equal(status.running, true);
+  assert.deepEqual(spawned, [{ command: scriptRoot + 'mihomo.sh status', args: '[]', options: '{}' }]);
+  assert.deepEqual(bridge.commands, [], 'ksu.exec is not used');
+  assertClean(bridge);
 });
 
 test('concurrent controller requests never share detected address or secret', async () => {
-  const bridge = makeBridge({ handler: (command) => command.startsWith('grep -E ') ? null : undefined });
+  const bridge = makeBridge({ handler: (command) => isDetect(command) ? null : undefined });
   const first = bridge.request('controller', { path: '/version' });
   const second = bridge.request('controller', { path: '/proxies' });
   assert.equal(bridge.calls.length, 2);
@@ -625,24 +692,20 @@ test('concurrent controller requests never share detected address or secret', as
   assertClean(bridge);
 });
 
-test('controller quotes every curl argument and sends JSON through curl, not WebView fetch', async () => {
+test('controller quotes every curl argument when it falls back to curl', async () => {
   const secret = "secret';$(id);`whoami`";
   const body = { name: "节点';$(id);`whoami`", nested: { enabled: true } };
   const target = "/proxies/group'$(id)?name=%E4%B8%AD&value=1";
-  const bridge = makeBridge({ handler: (command) => command.startsWith('grep -E ') ? result('external-controller: 127.0.0.1:9090\nsecret: ' + JSON.stringify(secret)) : httpResult(undefined, 204) });
+  const bridge = makeBridge({ handler: (command) => isDetect(command) ? result('external-controller: 127.0.0.1:9090\nsecret: ' + JSON.stringify(secret)) : httpResult(undefined, 204) });
   assert.deepEqual(await bridge.request('controller', { path: target, method: 'PUT', body }), { ok: true, data: null });
   const command = bridge.commands.at(-1);
   const args = curlArguments(command);
   assert.deepEqual(args, [
-    '--disable', '--silent', '--show-error', '--globoff', '--noproxy', '*', '--connect-timeout', '3',
-    '--max-time', '8', '--request', 'PUT', '--header', 'Authorization: Bearer ' + secret,
-    '--write-out', '\n__MIHOMO_HTTP__:%{http_code}', '--header', 'Content-Type: application/json',
+    '--request', 'PUT', '--header', 'Authorization: Bearer ' + secret, '--header', 'Content-Type: application/json',
     '--data-binary', JSON.stringify(body), '--url', 'http://127.0.0.1:9090' + target,
   ]);
-  assert.match(command, /\/system\/bin\/curl/);
-  assert.match(command, /command -v curl/);
-  assert.match(command, /exit 127/);
-  assert.deepEqual(bridge.fetches, []);
+  assert.ok(command.startsWith('MIHOMO_SECRET='));
+  assert.equal(bridge.fetches.length, 1);
   assertClean(bridge);
 });
 
@@ -1197,7 +1260,7 @@ function tailscaleBridge(handler) {
   return makeBridge({
     globals: tailscaleGlobals(),
     handler(command) {
-      if (command.startsWith('base64 -w 0 ')) return result(Buffer.from(tailscaleConfig).toString('base64'));
+      if (command === scriptRoot + 'host.sh read-config') return result(Buffer.from(tailscaleConfig).toString('base64'));
       return handler ? handler(command) : undefined;
     },
   });
@@ -1254,4 +1317,108 @@ test('openUrl only accepts http(s) and qrCode returns a square module matrix', a
   assert.ok(qr.rows.every((row) => row.length === qr.size && /^[01]+$/.test(row)));
   assert.equal(qr.rows[0].slice(0, 7), '1111111', 'finder pattern');
   assert.equal((await bridge.request('qrCode', { text: '' })).ok, false);
+});
+
+function remoteBridge(handler) {
+  const runs = [];
+  const bridge = makeBridge({
+    remote: {},
+    fetch: async (url, init) => {
+      if (url === 'api/run') {
+        const body = JSON.parse(init.body);
+        runs.push({ body, init });
+        const response = handler ? handler(body) : undefined;
+        if (response && response.status) return { ok: false, status: response.status, json: async () => response.body || {} };
+        const value = response || { errno: 0, stdout: JSON.stringify({ ok: true }), stderr: '' };
+        return { ok: true, status: 200, json: async () => value };
+      }
+      if (url === 'api/session') return { ok: true, status: 200, json: async () => ({ ok: true, via: 'tailscale', login: 'alice@example.com', passwordless: true }) };
+      throw new Error('unexpected fetch ' + url);
+    },
+  });
+  bridge.runs = runs;
+  return bridge;
+}
+
+test('remote mode runs module scripts through api/run without composing shell commands', async () => {
+  const bridge = remoteBridge((body) => {
+    if (body.script === 'mihomo.sh') return { errno: 0, stdout: JSON.stringify({ ok: true, running: true, desired: 'manual', allowed: true }), stderr: '' };
+    if (body.script === 'host.sh' && body.args[0] === 'controller') return { errno: 0, stdout: 'external-controller: 127.0.0.1:9090\nsecret: "s;$(id)"\nexternal-ui: ./dashboard', stderr: '' };
+    if (body.script === 'host.sh' && body.args[0] === 'api') return { errno: 0, stdout: '{"version":"x"}\n__MIHOMO_HTTP__:200', stderr: '' };
+    return undefined;
+  });
+  assert.equal((await bridge.request('status')).running, true);
+  assert.deepEqual(bridge.runs[0].body, { script: 'mihomo.sh', args: ['status'], env: {}, timeout: 30000 });
+  assert.equal(bridge.runs[0].init.headers['X-Mihomo-Request'], '1');
+  assert.equal(bridge.runs[0].init.credentials, 'same-origin');
+  assert.deepEqual(await bridge.request('controller', { path: '/version' }), { ok: true, data: { version: 'x' } });
+  const api = bridge.runs.find((run) => run.body.args[0] === 'api').body;
+  assert.deepEqual(api.args, ['api', 'GET', 'http://127.0.0.1:9090/version']);
+  assert.deepEqual(api.env, { MIHOMO_SECRET: 's;$(id)' });
+  assert.deepEqual(bridge.commands, [], 'no ksu.exec in remote mode');
+});
+
+test('remote mode reports expired sessions and opens links in the current browser', async () => {
+  const bridge = remoteBridge(() => ({ status: 401, body: { error: '需要登录' } }));
+  assertError(await bridge.request('status'), /登录/);
+  assert.match(bridge.context.location.href, /^login\?next=/);
+  const open = await remoteBridge().request('openUrl', { url: 'https://login.tailscale.com/a/x' });
+  assert.equal(open.ok, true);
+  const session = await remoteBridge().request('webuiSession');
+  assert.deepEqual(session, { ok: true, remote: true, via: 'tailscale', login: 'alice@example.com', passwordless: true });
+  assert.deepEqual(await makeBridge().request('webuiSession'), { ok: true, remote: false });
+});
+
+test('dashboard builds a zashboard setup link for the manager and for remote access', async () => {
+  const local = makeBridge({ handler: (command) => command === scriptRoot + 'host.sh controller' ? result('external-controller: 0.0.0.0:9090\nsecret: "k e"\nexternal-ui: ./dashboard') : undefined });
+  const direct = await local.request('dashboard');
+  assert.equal(direct.available, true);
+  assert.equal(direct.url, 'http://127.0.0.1:9090/ui/#/setup?disableUpgradeCore=1&secret=k+e&hostname=127.0.0.1&port=9090');
+  const remote = remoteBridge((body) => body.args[0] === 'controller' ? { errno: 0, stdout: 'external-controller: 127.0.0.1:9090\nexternal-ui: ui', stderr: '' } : undefined);
+  const proxied = await remote.request('dashboard');
+  assert.equal(proxied.url, 'http://192.168.1.5:9099/clash/ui/#/setup?disableUpgradeCore=1&hostname=192.168.1.5&port=9099&secondaryPath=%2Fclash&http=1');
+  const none = makeBridge({ handler: (command) => command === scriptRoot + 'host.sh controller' ? result('external-controller: 127.0.0.1:9090') : undefined });
+  assert.equal((await none.request('dashboard')).available, false);
+});
+
+test('webui settings and password are validated and passed as Base64', async () => {
+  const bridge = makeBridge();
+  assert.equal((await bridge.request('webuiSet', { settings: { enabled: true, lan: true, allow_cidrs: ['192.168.1.0/24'] } })).ok, true);
+  const command = bridge.commands.at(-1);
+  assert.ok(command.startsWith(scriptRoot + 'webui.sh set '));
+  const encoded = shellWords(command).at(-1);
+  assert.deepEqual(JSON.parse(Buffer.from(encoded, 'base64').toString()), { enabled: true, lan: true, allow_cidrs: ['192.168.1.0/24'] });
+  for (const settings of [{ password: 'x' }, { enabled: 'yes' }, { port: '80' }, { allow_cidrs: ['a b'] }, { tailscale_users: 'a' }]) {
+    assertError(await bridge.request('webuiSet', { settings }));
+  }
+  assert.equal((await bridge.request('webuiPasswd', { password: "p'ss word" })).ok, true);
+  assert.equal(Buffer.from(shellWords(bridge.commands.at(-1)).at(-1), 'base64').toString(), "p'ss word");
+  assertError(await bridge.request('webuiPasswd', { password: 'short' }), /6/);
+  assert.equal((await bridge.request('webuiPasswd', { password: '' })).ok, true);
+});
+
+test('proxyIcon downloads in the browser first, falls back to the module script and caches', async () => {
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
+  const storage = new Map();
+  const localStorage = { getItem: (key) => (storage.has(key) ? storage.get(key) : null), setItem: (key, value) => storage.set(key, value) };
+  const browser = makeBridge({
+    globals: { localStorage },
+    fetch: async (url) => {
+      if (url === 'https://cdn.example/ok.png') return { ok: true, status: 200, arrayBuffer: async () => png };
+      throw new Error('CORS');
+    },
+    handler: (command) => command.startsWith(scriptRoot + 'host.sh icon ') ? result(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>').toString('base64')) : undefined,
+  });
+  const direct = await browser.request('proxyIcon', { url: 'https://cdn.example/ok.png' });
+  assert.equal(direct.icon, 'data:image/png;base64,' + png.toString('base64'));
+  assert.equal(storage.get('mihomo.icon:https://cdn.example/ok.png'), direct.icon);
+  assert.equal(browser.commands.filter((command) => command.includes('host.sh icon')).length, 0);
+  const fallback = await browser.request('proxyIcon', { url: 'https://other.example/a.svg' });
+  assert.match(fallback.icon, /^data:image\/svg\+xml;base64,/);
+  assert.deepEqual(shellWords(browser.commands.at(-1)).slice(-2), ['icon', 'https://other.example/a.svg']);
+  const inline = 'data:image/png;base64,AAAA';
+  assert.equal((await browser.request('proxyIcon', { url: inline })).icon, inline);
+  for (const url of ['file:///etc/passwd', 'https://a b', 'javascript:alert(1)']) assertError(await browser.request('proxyIcon', { url }));
+  const broken = makeBridge({ handler: (command) => command.includes('host.sh icon') ? result('', 1, 'curl: (22) 404') : undefined });
+  assertError(await broken.request('proxyIcon', { url: 'https://x.example/i.png' }), /404/);
 });

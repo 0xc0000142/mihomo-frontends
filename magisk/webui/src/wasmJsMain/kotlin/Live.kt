@@ -363,6 +363,8 @@ internal data class LiveProxyGroup(
     val type: String,
     val selected: String,
     val options: List<String>,
+    val icon: String = "",
+    val hidden: Boolean = false,
 ) {
     val selectable: Boolean get() = type in liveSelectableGroupTypes
 }
@@ -394,6 +396,10 @@ internal object LiveProxies {
             error = result.error
             val proxies = result.value?.get("proxies") as? JsonObject ?: return
             readDelays(proxies)
+            nodes = proxies.mapNotNull { (name, element) ->
+                val proxy = element as? JsonObject ?: return@mapNotNull null
+                name to LiveNode(proxy.liveText("type"), proxy.liveBoolean("udp") == true)
+            }.toMap()
             groups = proxies.mapNotNull { (name, element) ->
                 val proxy = element as? JsonObject ?: return@mapNotNull null
                 val type = proxy.liveText("type")
@@ -404,6 +410,8 @@ internal object LiveProxies {
                     type = type,
                     selected = proxy.liveText("now"),
                     options = proxy.liveStrings("all").distinct(),
+                    icon = proxy.liveText("icon"),
+                    hidden = proxy.liveBoolean("hidden") == true,
                 )
             }.let { list ->
                 // 控制器按名称返回；GLOBAL 的 all 保持配置文件中的顺序，据此排序，GLOBAL 放最后。
@@ -420,6 +428,7 @@ internal object LiveProxies {
     fun refresh() = liveRun("刷新代理组中…", feedback) { load() }
 
     var delays by mutableStateOf<Map<String, Int>>(emptyMap())
+    var nodes by mutableStateOf<Map<String, LiveNode>>(emptyMap())
     var testing by mutableStateOf<Set<String>>(emptySet())
 
     private fun readDelays(proxies: JsonObject) {
@@ -449,6 +458,22 @@ internal object LiveProxies {
         }
     }
 
+    /** 单节点测速（点按节点上的延迟）。 */
+    fun testNode(name: String) {
+        if (name in testing) return
+        testing = testing + name
+        liveScope.launch {
+            try {
+                val url = liveEncodeComponent("https://cp.cloudflare.com/generate_204")
+                val result = liveCapture { liveControllerRead("/proxies/${liveEncodeComponent(name)}/delay?url=$url&timeout=5000") }
+                val delay = result.value?.liveNumber("delay")?.toInt()
+                delays = delays + (name to (delay ?: 0))
+            } finally {
+                testing = testing - name
+            }
+        }
+    }
+
     fun select(group: LiveProxyGroup, name: String) {
         if (!writable || !group.selectable || groups?.contains(group) != true || name !in group.options) return
         liveRun("切换 ${group.name} 中…", feedback, ::invalidate) {
@@ -462,6 +487,8 @@ internal object LiveProxies {
         }
     }
 }
+
+internal data class LiveNode(val type: String, val udp: Boolean)
 
 internal data class LiveConnection(val key: String, val value: JsonObject)
 

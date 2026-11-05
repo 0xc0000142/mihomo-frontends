@@ -352,3 +352,22 @@ test('tailscale set edits fields; delete removes rules, group members and bypass
   const dnsUse = config.replace('proxy-groups:', 'dns:\n  nameserver-policy:\n    +.tail.ts.net: [ts://TS]\nproxy-groups:');
   assert.throws(() => C.patch(dnsUse, [{ op: 'tailscale.delete', name: 'TS' }]), /ts:\/\/TS/);
 });
+
+test('tailscale webui publishes the management page on one outbound and advertise-routes is editable', () => {
+  let content = C.patch(rendered, [
+    { op: 'tailscale.add', name: 'TS-A', values: { hostname: 'a-node' } },
+    { op: 'tailscale.add', name: 'TS-B', values: { hostname: 'b-node', 'advertise-routes': ['192.168.1.0/24', '10.0.0.0/8'] } },
+  ]).content;
+  const routes = plain(content).proxies.find((item) => item.name === 'TS-B')['advertise-routes'];
+  assert.equal(JSON.stringify(routes), '["192.168.1.0/24","10.0.0.0/8"]');
+  content = C.patch(content, [{ op: 'tailscale.webui', name: 'TS-A', enable: true }]).content;
+  assert.equal(JSON.stringify(plain(content).proxies.find((item) => item.name === 'TS-A').serve), '[{"port":80,"target":"unix:run/webui.sock"}]');
+  assert.equal(JSON.stringify(C.schema(content).tailscale.map((item) => [item.name, item.webui])), '[["TS-A",true],["TS-B",false]]');
+  // 换到另一个出站时从原出站撤掉
+  content = C.patch(content, [{ op: 'tailscale.webui', name: 'TS-B', enable: true }]).content;
+  assert.equal(plain(content).proxies.find((item) => item.name === 'TS-A').serve, undefined);
+  content = C.patch(content, [{ op: 'tailscale.webui', name: 'TS-B', enable: false }]).content;
+  assert.equal(plain(content).proxies.find((item) => item.name === 'TS-B').serve, undefined);
+  assert.throws(() => C.patch(content, [{ op: 'tailscale.webui', name: 'TS-B' }]), /enable/);
+  assert.throws(() => C.patch(content, [{ op: 'tailscale.set', name: 'TS-B', values: { 'advertise-routes': ['nope'] } }]), /通告子网路由/);
+});
