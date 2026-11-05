@@ -15,15 +15,33 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: 安装 Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: 配置 Gradle 缓存与 Wrapper 校验
+        uses: gradle/actions/setup-gradle@v6
+      - name: Magisk 回归测试
+        run: |
+          node --test magisk/tests/frontend.test.js magisk/tests/bridge.test.js magisk/tests/onboarding.test.js magisk/tests/config.test.js
+          sh magisk/tests/core.test.sh
+          sh magisk/tests/backend.sh
+          sh magisk/tests/backend-process.sh
+          sh magisk/tests/backend-readiness.sh
+      - name: 构建 Compose Miuix Wasm WebUI
+        working-directory: magisk/webui
+        run: sh ./gradlew --no-daemon wasmJsBrowserDistribution
       - name: 打包 Magisk/KernelSU 模块
         run: |
-          sh magisk/build.sh
+          sh magisk/build.sh --skip-webui-build
           ls -l dist/
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
           name: magisk-module
           path: dist/*-magisk-*.zip
+          if-no-files-found: error
 
   luci:
     runs-on: ubuntu-latest

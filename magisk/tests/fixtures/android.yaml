@@ -1,0 +1,25 @@
+mixed-port: 17890
+external-controller: 127.0.0.1:19090
+secret: module-test
+log-level: info
+ipv6: false
+mode: rule
+dns:
+  enable: false
+rules:
+  - MATCH,REJECT
+listeners:
+  - name: ebpf-module-test
+    type: ebpf
+    mode: local
+    network: [tcp, udp]
+    local:
+      data-plane: cgroup
+      dns-mode: respect_policy
+      ipv6: false
+      bypass-private-address: true
+      exclude-uid: [0]
+    shared:
+      interface: [mh-test0]
+      data-plane: packet_rewrite
+      ipv6: false

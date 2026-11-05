@@ -1,0 +1,7 @@
+magisk/** text eol=lf
+magisk/**/*.jar binary
+magisk/**/*.otf binary
+magisk/**/*.ttf binary
+magisk/**/*.wasm binary
+magisk/**/*.png binary
+shared/*.yaml text eol=lf

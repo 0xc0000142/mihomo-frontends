@@ -6,3 +6,11 @@ Thumbs.db
 # 模板由 scripts/sync-template.sh 从 shared/ 生成
 luci/root/usr/share/mihomo-luci/template.yaml
 magisk/webroot/template.yaml
+screen.png
+
+/magisk/webui/.gradle/
+/magisk/webui/.kotlin/
+/magisk/webui/build/
+/magisk/webui/node_modules/
+/magisk/webui/*.log
+/magisk/webui/build-log.txt
